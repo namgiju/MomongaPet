@@ -36,6 +36,8 @@ let dockRangeFallback: ClosedRange<CGFloat>? = 106...1364
 let windowJumpChance = 0.15
 let walkOffEdgeChance = 0.10
 let jumpClearance: CGFloat = 40     // 창 상단보다 이만큼 더 높이 뛰어오름
+let hopRange: CGFloat = 60          // 창 높이 차가 이 이내(위·아래)면 가볍게 폴짝
+let hopClearance: CGFloat = 15      // 폴짝 뛸 때 더 오르는 높이
 let jumpHeightLimit: CGFloat = 0.95  // 점프 높이(dy+여유)가 화면 높이의 이 비율 미만일 때만 점프
 let maxJumpDX: CGFloat = 300        // 창까지 가로 거리가 이보다 멀면 걸어서 다가간 뒤 점프
 let jumpReactDelay = 0.6...1.4      // 새 창이 뜨고 이만큼(초) 뒤에 반응
@@ -410,13 +412,16 @@ final class Pet: NSObject {
         guard state != .sleep, let w = frontWin, platform?.number != w.number else { return false }
         let f = body
         let area = (window.screen ?? NSScreen.main!).visibleFrame
-        let g = abs(gravity), h = jumpClearance
+        let g = abs(gravity)
         let dy = w.frame.maxY - f.minY
-        guard dy > 0, dy + h < area.height * jumpHeightLimit,
+        let hop = abs(dy) <= hopRange                                 // 높이가 비슷하면 가볍게 폴짝 (조금 아래 창도 OK)
+        let h = hop ? hopClearance : jumpClearance
+        guard hop || dy > 0, dy + h < area.height * jumpHeightLimit,
               w.frame.maxY + h + f.height <= area.maxY else { return false }   // 천장에 부딪혀 궤도 틀어지지 않게
         let tx = jumpTargetX(w)
-        vy = sqrt(2 * g * (dy + h))
-        let t = (vy + sqrt(2 * g * h)) / g
+        let peak = max(dy, 0) + h                                     // 출발점 기준 최고 높이
+        vy = sqrt(2 * g * peak)
+        let t = (vy + sqrt(2 * g * (peak - dy))) / g
         vx = (tx - f.minX) / t
         platform = nil
         dropThrough = nil
@@ -510,7 +515,7 @@ final class Pet: NSObject {
             pendingJump = true
             pendingJumpAt = now + .random(in: jumpReactDelay)
             approaching = false
-            if [.idle, .walk, .dizzy, .notice, .watch].contains(state) {   // 바닥에 있어도 "!"로 알아챔
+            if [.idle, .walk, .notice, .watch].contains(state) {   // 바닥에 있어도 "!"로 알아챔 (헤롱헤롱 중엔 끝난 뒤에)
                 noticeFrame = (state == .walk ? 2 : 0) + (facingLeft ? 0 : 1)
                 vx = 0; walkOffEdge = false
                 setState(.notice)
@@ -522,9 +527,9 @@ final class Pet: NSObject {
                 pendingJump = false; approaching = false              // 이미 그 창 위
             } else if state == .sleep && !awaySleep {
                 wakeUp()                                              // 낮잠이면 깨워서 다음 틱에
-            } else if [.idle, .walk, .dizzy, .notice, .watch].contains(state), goToFrontWindow() {
+            } else if [.idle, .walk, .notice, .watch].contains(state), goToFrontWindow() {
                 pendingJump = false
-            }   // 공중이면 착지 후 다시 시도
+            }   // 공중이거나 헤롱헤롱 중이면 끝난 뒤 다시 시도
         }
 
         var f = body
@@ -611,7 +616,14 @@ final class Pet: NSObject {
             if stateTimer <= 0 { decide() }
         case .idle, .dizzy:
             stateTimer -= dt
-            if stateTimer <= 0 { decide() }
+            if stateTimer <= 0 {
+                if state == .dizzy && pendingJump {                // 헤롱헤롱 중에 창이 바뀌었으면 정신 차린 뒤 "!"
+                    pendingJumpAt = now + .random(in: jumpReactDelay)
+                    noticeFrame = facingLeft ? 0 : 1
+                    setState(.notice)
+                    stateTimer = pendingJumpAt - now
+                } else { decide() }
+            }
         case .sleep:
             stateTimer -= dt
             if stateTimer <= 0 { wakeUp() }                       // 낮잠 끝
