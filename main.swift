@@ -9,6 +9,7 @@ let animFPS = 8.0
 let sleepFPS = 3.0                  // 자는 애니메이션은 느리게
 let walkFPS = 5.0                   // 걷기 애니메이션 (걷는 속도에 맞춰 느리게)
 let walkSpeed: CGFloat = 45
+let dizzyDuration = 2.0            // 떨어진 뒤 헤롱거리는 시간(초)
 let gravity: CGFloat = -2200
 let jumpPower: CGFloat = 900
 let maxThrow: CGFloat = 1500
@@ -42,7 +43,7 @@ let padX = ceil(petSize.height * 0.2)
 let padTop = ceil(petSize.height * 0.1)
 let windowSize = NSSize(width: petSize.width + padX * 2, height: petSize.height + padTop)
 
-enum PetState: String { case idle, walk, drag, fall, jump, sleep }
+enum PetState: String { case idle, walk, drag, fall, jump, sleep, dizzy }
 
 // MARK: - 스프라이트 로더
 // 파일명 규칙: idle_01.png, walk_01.png, walk_02.png ... (없는 상태는 idle로 대체)
@@ -197,6 +198,7 @@ final class Pet: NSObject {
     var frameIdx = 0
     var animAcc = 0.0
     var stateTimer = 0.0
+    var jumped = false                  // 스스로 뛴 점프면 착지 후 헤롱거리지 않음
     var dragTime = 0.0
     var lastTick = ProcessInfo.processInfo.systemUptime
 
@@ -332,6 +334,7 @@ final class Pet: NSObject {
         vx = (tx - f.minX) / t
         platform = nil
         walkOffEdge = false
+        jumped = true
         setState(.jump)
         return true
     }
@@ -355,8 +358,14 @@ final class Pet: NSObject {
         walkOffEdge = false
         if let w { f.origin.x = max(w.frame.minX, min(f.origin.x, w.frame.maxX - f.width)) }
         if isAway { sleep(away: true); return }
-        setState(.idle)
-        stateTimer = .random(in: 1...3)
+        if jumped {
+            jumped = false
+            setState(.idle)
+            stateTimer = .random(in: 1...3)
+        } else {
+            setState(.dizzy)                            // 떨어지거나 던져졌으면 잠깐 헤롱헤롱
+            stateTimer = dizzyDuration
+        }
     }
 
     // MARK: 틱
@@ -371,7 +380,7 @@ final class Pet: NSObject {
             let prev = sysIdle
             sysIdle = systemIdleSeconds()
             if state == .sleep && awaySleep && (sysIdle < 1 || sysIdle < prev) { wakeUp() }
-            else if isAway && (state == .idle || state == .walk) { sleep(away: true) }
+            else if isAway && (state == .idle || state == .walk || state == .dizzy) { sleep(away: true) }
         }
 
         // 드래그 중엔 이동·중력·타이머 전부 정지하고 흔들림만
@@ -449,7 +458,7 @@ final class Pet: NSObject {
             if f.maxX >= hi { f.origin.x = hi - f.width; vx = -abs(vx) }
             stateTimer -= dt
             if stateTimer <= 0 { decide() }
-        case .idle:
+        case .idle, .dizzy:
             stateTimer -= dt
             if stateTimer <= 0 { decide() }
         case .sleep:
@@ -461,7 +470,7 @@ final class Pet: NSObject {
         if let p = platform, f.midX < p.frame.minX || f.midX > p.frame.maxX { platform = nil }
 
         // 서 있는 상태: 바닥(창 상단 또는 화면 바닥)에 붙이기
-        if state == .idle || state == .walk || state == .sleep {
+        if state == .idle || state == .walk || state == .sleep || state == .dizzy {
             let ground = platform?.frame.maxY ?? screenFloor
             let gap = f.minY - ground
             if gap <= 1 {
@@ -479,7 +488,7 @@ final class Pet: NSObject {
             }
         }
         f.origin.x = max(area.minX, min(f.origin.x, area.maxX - f.width))
-        if platform == nil && (state == .idle || state == .walk || state == .sleep) {
+        if platform == nil && (state == .idle || state == .walk || state == .sleep || state == .dizzy) {
             f.origin.x = max(floorLo, min(f.origin.x, floorHi - f.width))
         }
         if f.origin != body.origin { body = f }
@@ -512,6 +521,7 @@ final class Pet: NSObject {
         if pressIsJump && state != .fall && state != .jump {
             vy = jumpPower; vx = 0
             platform = nil
+            jumped = true
             setState(.jump)
         }
     }
@@ -528,6 +538,7 @@ final class Pet: NSObject {
             vx = 0; vy = 0
             platform = nil
             walkOffEdge = false
+            jumped = false                      // 점프 중 잡혀서 던져지면 헤롱거림
         }
         let p = NSPoint(x: m.x - dragOffset.x, y: m.y - dragOffset.y)
         let now = ProcessInfo.processInfo.systemUptime
