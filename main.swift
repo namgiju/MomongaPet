@@ -22,9 +22,9 @@ let napDuration = 15.0...30.0
 let napCooldown = 600.0             // 깨어난 직후 이 시간 동안은 낮잠 안 잠
 let wakeIdleTime = 1.5              // 깨어나서 멍하니 있는 시간
 
-// 화면 바닥에서 다닐 가로 범위 (주 화면 기준 pt, nil이면 화면 전체)
-// Dock 배경 좌우 끝 (2026-11-10 측정값에서 양쪽 50pt씩 안쪽으로 보정). Dock 너비가 바뀌면 다시 맞춰야 함
-let dockRange: ClosedRange<CGFloat>? = 106...1364
+// 화면 바닥에서 다닐 가로 범위: 손쉬운 사용 권한이 있으면 Dock 아이콘 줄 범위를 2초마다 읽음
+// (앱을 켜고 끄면 Dock 너비가 바뀌므로). 권한이 없을 때 쓸 고정 범위 (주 화면 기준 pt, nil이면 화면 전체)
+let dockRangeFallback: ClosedRange<CGFloat>? = 106...1364
 
 // 창 위로 점프
 let windowJumpChance = 0.15
@@ -149,6 +149,25 @@ func platformStatus(number: Int, in list: [[String: Any]]) -> (info: WinInfo, ab
     return nil
 }
 
+/// Dock 아이콘 줄의 가로 범위 (주 화면 기준 pt). 손쉬운 사용 권한이 있고 Dock이 아래쪽에 있을 때만
+func dockIconRange() -> ClosedRange<CGFloat>? {
+    guard AXIsProcessTrusted(),
+          let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else { return nil }
+    let app = AXUIElementCreateApplication(dock.processIdentifier)
+    var kids: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(app, kAXChildrenAttribute as CFString, &kids) == .success,
+          let list = (kids as? [AXUIElement])?.first else { return nil }
+    var posRef: CFTypeRef?, sizeRef: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(list, kAXPositionAttribute as CFString, &posRef) == .success,
+          AXUIElementCopyAttributeValue(list, kAXSizeAttribute as CFString, &sizeRef) == .success,
+          let posRef, let sizeRef else { return nil }
+    var p = CGPoint.zero, sz = CGSize.zero
+    AXValueGetValue(posRef as! AXValue, .cgPoint, &p)
+    AXValueGetValue(sizeRef as! AXValue, .cgSize, &sz)
+    guard sz.width > sz.height, sz.width > 0 else { return nil }   // 왼쪽·오른쪽 Dock은 무시
+    return p.x...(p.x + sz.width)
+}
+
 /// 시스템 전체 유휴 시간(마지막 키보드·마우스 입력 이후 초)
 func systemIdleSeconds() -> Double {
     CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
@@ -207,6 +226,10 @@ final class Pet: NSObject {
     var sysIdle = 0.0
     var lastIdlePoll = 0.0
     var lastWake = -Double.infinity
+
+    // Dock
+    var dockRange = dockRangeFallback
+    var lastDockPoll = -Double.infinity
 
     // 창
     var frontWin: WinInfo?              // 포어그라운드 앱의 대표 창 (캐시)
@@ -373,6 +396,12 @@ final class Pet: NSObject {
         let now = ProcessInfo.processInfo.systemUptime
         let dt = min(now - lastTick, 0.05)
         lastTick = now
+
+        // Dock 범위 (2초 간격)
+        if now - lastDockPoll >= 2 {
+            lastDockPoll = now
+            dockRange = dockIconRange() ?? dockRangeFallback
+        }
 
         // 시스템 유휴 시간 (1초 간격)
         if now - lastIdlePoll >= 1 {
@@ -568,6 +597,9 @@ final class Pet: NSObject {
         menu.addItem(withTitle: "스프라이트 폴더 열기", action: #selector(openFolder), keyEquivalent: "").target = self
         menu.addItem(withTitle: "스프라이트 다시 불러오기", action: #selector(reloadSprites), keyEquivalent: "").target = self
         menu.addItem(withTitle: "재우기", action: #selector(goSleep), keyEquivalent: "").target = self
+        if !AXIsProcessTrusted() {
+            menu.addItem(withTitle: "Dock 크기 자동 맞추기 (권한 필요)…", action: #selector(askAccessibility), keyEquivalent: "").target = self
+        }
         menu.addItem(.separator())
         menu.addItem(withTitle: "종료", action: #selector(quit), keyEquivalent: "").target = self
         NSMenu.popUpContextMenu(menu, with: e, for: v)
@@ -589,6 +621,11 @@ final class Pet: NSObject {
     @objc func goSleep() {
         guard !isAirborne && state != .drag else { return }
         sleep(away: false, duration: .random(in: napDuration))
+    }
+    @objc func askAccessibility() {
+        // 시스템 권한 요청 창을 띄우고, 설정의 손쉬운 사용 화면도 열어 줌
+        _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
     }
     @objc func quit() { NSApp.terminate(nil) }
 }

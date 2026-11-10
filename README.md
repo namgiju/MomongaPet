@@ -15,8 +15,11 @@ cp -R build/MomongaPet.app /Applications/
 open /Applications/MomongaPet.app
 ```
 
-Dock 범위(펫이 다니는 가로 범위)는 `main.swift`의 `dockRange`에 고정값으로 들어 있어요.
-Dock 너비가 바뀌면 이 값을 다시 맞추고 빌드하세요.
+펫이 Dock 위에서만 다니게 하려면 시스템 설정 → 개인정보 보호 및 보안 → **손쉬운 사용**에서 MomongaPet을 켜세요
+(우클릭 메뉴의 **Dock 크기 자동 맞추기**로 바로 열 수 있어요). 앱을 켜고 끌 때 바뀌는 Dock 너비를 2초마다 읽어 맞춰요.
+권한이 없으면 `main.swift`의 `dockRangeFallback` 고정값을 써요.
+
+빌드할 때마다 서명이 바뀌어서, 새로 빌드한 뒤엔 손쉬운 사용 목록에서 MomongaPet을 지우고 다시 켜야 할 수 있어요.
 
 ## 사용법
 
