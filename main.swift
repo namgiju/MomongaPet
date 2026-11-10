@@ -15,9 +15,9 @@ let spritesFaceRight = true         // 원본 이미지가 왼쪽을 보고 있�
 
 // 잠
 let awaySleepAfter = 180.0          // 시스템 유휴(키보드·마우스 입력 없음) 이만큼(초) 지나면 잠
-let napChance = 0.03                // 상태 전환 시 낮잠 확률
+let napChance = 0.01                // 상태 전환 시 낮잠 확률
 let napDuration = 15.0...30.0
-let napCooldown = 60.0              // 깨어난 직후 이 시간 동안은 낮잠 안 잠
+let napCooldown = 600.0             // 깨어난 직후 이 시간 동안은 낮잠 안 잠
 let wakeIdleTime = 1.5              // 깨어나서 멍하니 있는 시간
 
 // 화면 바닥에서 다닐 가로 범위 (주 화면 기준 pt, nil이면 화면 전체)
