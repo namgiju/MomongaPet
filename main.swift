@@ -578,6 +578,7 @@ final class Pet: NSObject {
             }
         }
         if state == .notice || state == .watch { watchLeft = mouse.x < f.midX }
+        if state == .watch { facingLeft = watchLeft }             // 쳐다보는 쪽 = 보고 있는 방향 (다음 "!" 방향이 어긋나지 않게)
 
         switch state {
         case .drag:
