@@ -9,18 +9,14 @@ macOS 화면 아래 Dock 위를 돌아다니는 작은 데스크톱 펫.
 
 ## 설치
 
-1. [Releases](../../releases)에서 `MomongaPet.zip`을 받아 압축을 풀고 `MomongaPet.app`을 응용 프로그램 폴더로 옮기기
-2. 처음 실행할 때 "확인되지 않은 개발자" 경고가 뜨면:
-   - **시스템 설정 → 개인정보 보호 및 보안** 아래쪽의 **"그래도 열기"** 클릭
-   - 또는 터미널에서 `xattr -dr com.apple.quarantine /Applications/MomongaPet.app`
+```sh
+./build.sh
+cp -R build/MomongaPet.app /Applications/
+open /Applications/MomongaPet.app
+```
 
-macOS 12 이상, Apple Silicon / Intel 모두 지원.
-
-### Dock 위에서만 다니게 하기 (선택)
-
-기본은 화면 아래쪽 전체 너비를 돌아다녀요. Dock 아이콘 줄 위에서만 다니게 하려면
-우클릭 → **Dock 위에서만 다니게 하기 (권한 필요)** → 시스템 설정의 **손쉬운 사용**에서 MomongaPet 켜기.
-Dock 위치를 읽는 데만 쓰고, 다른 앱을 조작하지 않아요.
+Dock 범위(펫이 다니는 가로 범위)는 `main.swift`의 `dockRange`에 고정값으로 들어 있어요.
+Dock 너비가 바뀌면 이 값을 다시 맞추고 빌드하세요.
 
 ## 사용법
 
@@ -32,8 +28,6 @@ Dock 위치를 읽는 데만 쓰고, 다른 앱을 조작하지 않아요.
 | 우클릭 | 메뉴 (스프라이트 폴더 열기 / 다시 불러오기 / 재우기 / 종료) |
 
 ## 스프라이트 넣기
-
-캐릭터 이미지는 저장소에 포함돼 있지 않아요. 이미지가 없으면 흰 동그라미가 나와요.
 
 우클릭 → **스프라이트 폴더 열기** (`~/MomongaPet/sprites`)에 PNG를 넣고 **스프라이트 다시 불러오기**.
 
