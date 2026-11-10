@@ -8,6 +8,7 @@ let petSize = NSSize(width: 50, height: 50)
 let animFPS = 8.0
 let sleepFPS = 3.0                  // 자는 애니메이션은 느리게
 let walkFPS = 5.0                   // 걷기 애니메이션 (걷는 속도에 맞춰 느리게)
+let watchFPS = 2.0                  // 쳐다볼 때 눈동자 움직임 (느리게)
 let walkSpeed: CGFloat = 45
 let dizzyDuration = 2.0            // 떨어진 뒤 헤롱거리는 시간(초)
 
@@ -587,7 +588,7 @@ final class Pet: NSObject {
         if state == .watch, let w = sprites.named(watchLeft ? "watchleft" : "watchright") { frames = w; mirror = false }
         view.mirrored = mirror
         animAcc += dt
-        let fps = state == .sleep ? sleepFPS : state == .walk ? walkFPS : animFPS
+        let fps = state == .sleep ? sleepFPS : state == .walk ? walkFPS : state == .watch ? watchFPS : animFPS
         if animAcc >= 1 / fps { animAcc = 0; frameIdx += 1 }
         if frameIdx >= frames.count { frameIdx = state == .jump ? frames.count - 1 : 0 }   // 점프는 한 번만 재생
         view.image = frames[frameIdx]
