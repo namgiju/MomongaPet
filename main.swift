@@ -7,6 +7,7 @@ let bundledSpriteDir = Bundle.main.resourcePath.map { ($0 as NSString).appending
 let petSize = NSSize(width: 50, height: 50)
 let animFPS = 8.0
 let sleepFPS = 3.0                  // 자는 애니메이션은 느리게
+let walkFPS = 5.0                   // 걷기 애니메이션 (걷는 속도에 맞춰 느리게)
 let walkSpeed: CGFloat = 45
 let gravity: CGFloat = -2200
 let jumpPower: CGFloat = 900
@@ -490,7 +491,8 @@ final class Pet: NSObject {
     func animate(_ dt: Double) {
         let frames = sprites.frames(for: state)
         animAcc += dt
-        if animAcc >= 1 / (state == .sleep ? sleepFPS : animFPS) { animAcc = 0; frameIdx += 1 }
+        let fps = state == .sleep ? sleepFPS : state == .walk ? walkFPS : animFPS
+        if animAcc >= 1 / fps { animAcc = 0; frameIdx += 1 }
         if frameIdx >= frames.count { frameIdx = state == .jump ? frames.count - 1 : 0 }   // 점프는 한 번만 재생
         view.image = frames[frameIdx]
     }
