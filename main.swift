@@ -590,6 +590,13 @@ final class Pet: NSObject {
         animAcc += dt
         let fps = state == .sleep ? sleepFPS : state == .walk ? walkFPS : state == .watch ? watchFPS : animFPS
         if animAcc >= 1 / fps { animAcc = 0; frameIdx += 1 }
+        if state == .watch && frames.count > 2 {
+            // 왕복 재생 (1 2 3 2 1 2 3 …): 눈동자가 자연스럽게 오가도록
+            let period = frames.count * 2 - 2
+            frameIdx %= period
+            view.image = frames[frameIdx < frames.count ? frameIdx : period - frameIdx]
+            return
+        }
         if frameIdx >= frames.count { frameIdx = state == .jump ? frames.count - 1 : 0 }   // 점프는 한 번만 재생
         view.image = frames[frameIdx]
     }
