@@ -23,8 +23,8 @@ let napCooldown = 600.0             // 깨어난 직후 이 시간 동안은 낮
 let wakeIdleTime = 1.5              // 깨어나서 멍하니 있는 시간
 
 // 화면 바닥에서 다닐 가로 범위 (주 화면 기준 pt, nil이면 화면 전체)
-// 2026-11-10 스크린샷에서 잰 Dock 배경 좌우 끝. Dock 너비가 바뀌면 다시 맞춰야 함
-let dockRange: ClosedRange<CGFloat>? = 56...1414
+// Dock 배경 좌우 끝 (2026-11-10 측정값에서 양쪽 50pt씩 안쪽으로 보정). Dock 너비가 바뀌면 다시 맞춰야 함
+let dockRange: ClosedRange<CGFloat>? = 106...1364
 
 // 창 위로 점프
 let windowJumpChance = 0.15
