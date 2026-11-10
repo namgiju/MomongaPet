@@ -10,6 +10,11 @@ let sleepFPS = 3.0                  // 자는 애니메이션은 느리게
 let walkFPS = 5.0                   // 걷기 애니메이션 (걷는 속도에 맞춰 느리게)
 let walkSpeed: CGFloat = 45
 let dizzyDuration = 2.0            // 떨어진 뒤 헤롱거리는 시간(초)
+
+// 창 위에서 마우스 쳐다보기
+let noticeDuration = 0.5            // 처음 알아챘을 때 "!" 표시 시간(초)
+let watchTimeout = 2.0              // 서 있는 창 안에서 마우스가 이만큼 안 움직이면 평소대로
+let mouseMoveThreshold: CGFloat = 2 // 이보다 작게 움직이면 무시 (떨림)
 let gravity: CGFloat = -2200
 let jumpPower: CGFloat = 900
 let maxThrow: CGFloat = 1500
@@ -43,7 +48,7 @@ let padX = ceil(petSize.height * 0.2)
 let padTop = ceil(petSize.height * 0.1)
 let windowSize = NSSize(width: petSize.width + padX * 2, height: petSize.height + padTop)
 
-enum PetState: String { case idle, walk, drag, fall, jump, sleep, dizzy }
+enum PetState: String { case idle, walk, drag, fall, jump, sleep, dizzy, notice, watch }
 
 // MARK: - 스프라이트 로더
 // 파일명 규칙: idle_01.png, walk_01.png, walk_02.png ... (없는 상태는 idle로 대체)
@@ -72,6 +77,12 @@ final class Sprites {
                 frames[key, default: []].append(img)
             }
         }
+    }
+
+    /// 이름으로 직접 찾기 (없으면 nil)
+    func named(_ key: String) -> [NSImage]? {
+        if let f = frames[key], !f.isEmpty { return f }
+        return nil
     }
 
     func frames(for s: PetState) -> [NSImage] {
@@ -218,6 +229,13 @@ final class Pet: NSObject {
     var animAcc = 0.0
     var stateTimer = 0.0
     var jumped = false                  // 스스로 뛴 점프면 착지 후 헤롱거리지 않음
+    var facingLeft = false
+
+    // 창 위에서 마우스 쳐다보기
+    var lastMouse = NSEvent.mouseLocation
+    var lastMouseMove = 0.0             // 서 있는 창 안에서 마우스가 마지막으로 움직인 시각
+    var noticeFrame = 0                 // notice 시트 칸: 0 idle왼쪽, 1 idle오른쪽, 2 walk왼쪽, 3 walk오른쪽
+    var watchLeft = false               // 마우스가 펫 왼쪽에 있음
     var dragTime = 0.0
     var lastTick = ProcessInfo.processInfo.systemUptime
 
@@ -230,6 +248,7 @@ final class Pet: NSObject {
     // Dock
     var dockRange = dockRangeFallback
     var lastDockPoll = -Double.infinity
+    var lastDockLog = ""
 
     // 창
     var frontWin: WinInfo?              // 포어그라운드 앱의 대표 창 (캐시)
@@ -400,7 +419,17 @@ final class Pet: NSObject {
         // Dock 범위 (2초 간격)
         if now - lastDockPoll >= 2 {
             lastDockPoll = now
-            dockRange = dockIconRange() ?? dockRangeFallback
+            let r = dockIconRange()
+            let next = r ?? dockRangeFallback
+            if next != dockRange || lastDockLog.isEmpty {
+                let msg = "trusted=\(AXIsProcessTrusted()) ax=\(r.map { "\($0)" } ?? "nil") 사용=\(next.map { "\($0)" } ?? "nil") 화면=\(NSScreen.screens.first?.frame ?? .zero)"
+                if msg != lastDockLog {
+                    lastDockLog = msg
+                    let path = (NSHomeDirectory() as NSString).appendingPathComponent("MomongaPet/dock.log")
+                    try? (msg + "\n").write(toFile: path, atomically: true, encoding: .utf8)
+                }
+            }
+            dockRange = next
         }
 
         // 시스템 유휴 시간 (1초 간격)
@@ -409,7 +438,7 @@ final class Pet: NSObject {
             let prev = sysIdle
             sysIdle = systemIdleSeconds()
             if state == .sleep && awaySleep && (sysIdle < 1 || sysIdle < prev) { wakeUp() }
-            else if isAway && (state == .idle || state == .walk || state == .dizzy) { sleep(away: true) }
+            else if isAway && (state == .idle || state == .walk || state == .dizzy || state == .watch) { sleep(away: true) }
         }
 
         // 드래그 중엔 이동·중력·타이머 전부 정지하고 흔들림만
@@ -453,6 +482,22 @@ final class Pet: NSObject {
             }
         }
 
+        // 창 위에 있을 때 그 창 안에서 마우스가 움직이면 "!" 후 쳐다보기 (Dock 위에선 안 함)
+        let mouse = NSEvent.mouseLocation
+        if hypot(mouse.x - lastMouse.x, mouse.y - lastMouse.y) > mouseMoveThreshold {
+            lastMouse = mouse
+            if let p = platform, p.frame.contains(mouse) {
+                lastMouseMove = now
+                if state == .idle || state == .walk {
+                    noticeFrame = (state == .walk ? 2 : 0) + (facingLeft ? 0 : 1)
+                    vx = 0; walkOffEdge = false
+                    setState(.notice)
+                    stateTimer = noticeDuration
+                }
+            }
+        }
+        if state == .notice || state == .watch { watchLeft = mouse.x < f.midX }
+
         switch state {
         case .drag:
             break
@@ -493,13 +538,21 @@ final class Pet: NSObject {
         case .sleep:
             stateTimer -= dt
             if stateTimer <= 0 { wakeUp() }                       // 낮잠 끝
+        case .notice:
+            stateTimer -= dt
+            if stateTimer <= 0 { setState(.watch) }
+        case .watch:
+            if now - lastMouseMove >= watchTimeout {              // 2초 조용하면 평소대로
+                facingLeft = watchLeft
+                decide()
+            }
         }
 
         // 펫 중심이 창 범위를 벗어나면 발판 해제
         if let p = platform, f.midX < p.frame.minX || f.midX > p.frame.maxX { platform = nil }
 
         // 서 있는 상태: 바닥(창 상단 또는 화면 바닥)에 붙이기
-        if state == .idle || state == .walk || state == .sleep || state == .dizzy {
+        if state == .idle || state == .walk || state == .sleep || state == .dizzy || state == .notice || state == .watch {
             let ground = platform?.frame.maxY ?? screenFloor
             let gap = f.minY - ground
             if gap <= 1 {
@@ -517,17 +570,22 @@ final class Pet: NSObject {
             }
         }
         f.origin.x = max(area.minX, min(f.origin.x, area.maxX - f.width))
-        if platform == nil && (state == .idle || state == .walk || state == .sleep || state == .dizzy) {
+        if platform == nil && (state == .idle || state == .walk || state == .sleep || state == .dizzy || state == .notice || state == .watch) {
             f.origin.x = max(floorLo, min(f.origin.x, floorHi - f.width))
         }
         if f.origin != body.origin { body = f }
 
-        if vx != 0 { view.mirrored = spritesFaceRight ? (vx < 0) : (vx > 0) }
+        if vx != 0 { facingLeft = vx < 0 }
         animate(dt)
     }
 
     func animate(_ dt: Double) {
-        let frames = sprites.frames(for: state)
+        var frames = sprites.frames(for: state)
+        var mirror = spritesFaceRight ? facingLeft : !facingLeft
+        // notice·watch 그림은 방향별로 따로 있어서 뒤집지 않음
+        if state == .notice, let n = sprites.named("notice"), n.count >= 4 { frames = [n[noticeFrame]]; mirror = false }
+        if state == .watch, let w = sprites.named(watchLeft ? "watchleft" : "watchright") { frames = w; mirror = false }
+        view.mirrored = mirror
         animAcc += dt
         let fps = state == .sleep ? sleepFPS : state == .walk ? walkFPS : animFPS
         if animAcc >= 1 / fps { animAcc = 0; frameIdx += 1 }

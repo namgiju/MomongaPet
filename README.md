@@ -45,6 +45,8 @@ open /Applications/MomongaPet.app
 | `fall` | 떨어질 때 | idle |
 | `sleep` | 잘 때 | idle |
 | `dizzy` | 떨어지거나 던져진 뒤 2초 (스스로 뛴 점프는 제외) | idle |
+| `notice` | 창 위에서 그 창 안의 마우스가 움직이면 0.5초 "!" (4칸 고정 순서: idle왼쪽·idle오른쪽·walk왼쪽·walk오른쪽) | idle |
+| `watchright` / `watchleft` | "!" 뒤 마우스 쪽을 내려다봄. 2초간 움직임 없으면 평소대로 (뒤집지 않음) | idle |
 
 원본 그림은 오른쪽을 보고 있어야 해요 (왼쪽으로 걸을 땐 자동으로 뒤집힘).
 
