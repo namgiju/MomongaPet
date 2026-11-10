@@ -220,9 +220,20 @@ final class Pet: NSObject {
     var dragSamples: [(t: Double, p: NSPoint)] = []
 
     /// 펫 몸통(발 아래 왼쪽 기준) 사각형. 창은 여기서 좌우·위로 여백만큼 큼
+    /// 창 위치는 정수로 버림되므로(1pt 미만 이동이 사라짐) 실제 위치는 소수점까지 따로 보관.
+    /// 드래그 등으로 창이 다른 곳으로 옮겨졌으면 창 위치를 따름
+    var exactOrigin: NSPoint?
     var body: NSRect {
-        get { NSRect(x: window.frame.minX + padX, y: window.frame.minY, width: petSize.width, height: petSize.height) }
-        set { window.setFrameOrigin(NSPoint(x: newValue.minX - padX, y: newValue.minY)) }
+        get {
+            let wf = window.frame.origin
+            var o = NSPoint(x: wf.x + padX, y: wf.y)
+            if let e = exactOrigin, abs(e.x - padX - wf.x) < 1, abs(e.y - wf.y) < 1 { o = e }
+            return NSRect(origin: o, size: petSize)
+        }
+        set {
+            exactOrigin = newValue.origin
+            window.setFrameOrigin(NSPoint(x: newValue.minX - padX, y: newValue.minY))
+        }
     }
 
     var isAirborne: Bool { state == .fall || state == .jump }
