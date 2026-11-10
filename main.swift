@@ -37,6 +37,8 @@ let windowJumpChance = 0.15
 let walkOffEdgeChance = 0.10
 let jumpClearance: CGFloat = 40     // 창 상단보다 이만큼 더 높이 뛰어오름
 let jumpHeightLimit: CGFloat = 0.95  // 점프 높이(dy+여유)가 화면 높이의 이 비율 미만일 때만 점프
+let maxJumpDX: CGFloat = 300        // 창까지 가로 거리가 이보다 멀면 걸어서 다가간 뒤 점프
+let jumpReactDelay = 0.6...1.4      // 새 창이 뜨고 이만큼(초) 뒤에 반응
 let softDropLimit: CGFloat = 30     // 발판이 이보다 조금 내려가면 상태 유지한 채 툭 떨어짐
 
 // 드래그 흔들림
@@ -258,6 +260,11 @@ final class Pet: NSObject {
     var platformNow: WinInfo?           // 그 창의 최신 조회 결과 (닫히거나 최소화되면 nil)
     var platformAbove: [NSRect] = []    // 그 창보다 앞에 있는 창들 (가려짐 판정용)
     var walkOffEdge = false             // 창 끝에서 돌지 않고 걸어가 떨어지기
+    var pendingJump = false             // 새 창이 앞에 나타남 → 뛸 수 있게 되면 그 창으로
+    var pendingJumpAt = 0.0             // 이 시각 이후에 반응
+    var dropThrough: Int?               // 끌려서 움직인 발판 창: 떨어지는 동안 다시 착지 안 함
+    var approaching = false             // 점프하려고 창 쪽으로 걸어가는 중
+    var lastApproachDist = CGFloat.infinity
 
     // 마우스
     var pressLocation = NSPoint.zero        // 누른 지점 (화면 좌표)
@@ -336,13 +343,18 @@ final class Pet: NSObject {
 
     func decide() {
         walkOffEdge = false
+        approaching = false
         if isAway { sleep(away: true); return }
 
         let now = ProcessInfo.processInfo.systemUptime
         if now - lastWake >= napCooldown && Double.random(in: 0..<1) < napChance {
             sleep(away: false, duration: .random(in: napDuration)); return
         }
-        if Double.random(in: 0..<1) < windowJumpChance && jumpToFrontWindow() { return }
+        if Double.random(in: 0..<1) < windowJumpChance, let w = frontWin, platform?.number != w.number {
+            pendingJump = true; pendingJumpAt = now                   // 다음 틱에 다가가거나 점프
+            vx = 0; setState(.idle); stateTimer = 5
+            return
+        }
 
         if Double.random(in: 0..<1) < 0.5 {
             setState(.walk)
@@ -363,6 +375,37 @@ final class Pet: NSObject {
     }
 
     // MARK: 창 점프
+    /// 몸 전체가 창 안쪽에 오도록 하는 착지 x
+    func jumpTargetX(_ w: WinInfo) -> CGFloat {
+        max(w.frame.minX, min(body.minX, w.frame.maxX - body.width))
+    }
+
+    /// 앞 창으로: 가까우면 점프, 멀면 그쪽으로 걸어감.
+    /// true = 끝(점프했거나 못 뛰는 창이라 포기), false = 아직 다가가는 중
+    func goToFrontWindow() -> Bool {
+        guard let w = frontWin, platform?.number != w.number else { return true }
+        let dx = jumpTargetX(w) - body.minX
+        // 창 끝·화면 끝에 막혀 더 못 다가가면 거기서 뜀
+        let blocked = approaching && state == .walk && abs(dx) >= lastApproachDist - 0.01
+        if abs(dx) > maxJumpDX && !blocked {
+            if !(approaching && state == .walk) {
+                approaching = true
+                walkOffEdge = false
+                setState(.walk)
+                stateTimer = 30
+            }
+            vx = (dx < 0 ? -1 : 1) * walkSpeed
+            lastApproachDist = abs(dx)
+            return false
+        }
+        let wasApproaching = approaching
+        approaching = false
+        lastApproachDist = .infinity
+        if jumpToFrontWindow() { return true }
+        if wasApproaching { vx = 0; setState(.idle); stateTimer = .random(in: 1...3) }
+        return true
+    }
+
     func jumpToFrontWindow() -> Bool {
         guard state != .sleep, let w = frontWin, platform?.number != w.number else { return false }
         let f = body
@@ -371,11 +414,12 @@ final class Pet: NSObject {
         let dy = w.frame.maxY - f.minY
         guard dy > 0, dy + h < area.height * jumpHeightLimit,
               w.frame.maxY + h + f.height <= area.maxY else { return false }   // 천장에 부딪혀 궤도 틀어지지 않게
-        let tx = max(w.frame.minX, min(f.minX, w.frame.maxX - f.width))   // 몸 전체가 창 안쪽에 오도록
+        let tx = jumpTargetX(w)
         vy = sqrt(2 * g * (dy + h))
         let t = (vy + sqrt(2 * g * h)) / g
         vx = (tx - f.minX) / t
         platform = nil
+        dropThrough = nil
         walkOffEdge = false
         jumped = true
         setState(.jump)
@@ -396,6 +440,7 @@ final class Pet: NSObject {
     func land(_ f: inout NSRect, y: CGFloat, on w: WinInfo?) {
         f.origin.y = y
         vx = 0; vy = 0
+        dropThrough = nil
         platform = w
         platformNow = w
         walkOffEdge = false
@@ -460,6 +505,28 @@ final class Pet: NSObject {
             refreshWindows()
         }
 
+        // 앞 창이 바뀌면(새 창이 뜨거나 다른 창으로 전환) 잠깐 뒤 확률 없이 그 창으로
+        if let w = frontWin, w.number != prevWin?.number {
+            pendingJump = true
+            pendingJumpAt = now + .random(in: jumpReactDelay)
+            approaching = false
+            if [.idle, .walk, .dizzy, .notice, .watch].contains(state) {   // 바닥에 있어도 "!"로 알아챔
+                noticeFrame = (state == .walk ? 2 : 0) + (facingLeft ? 0 : 1)
+                vx = 0; walkOffEdge = false
+                setState(.notice)
+                stateTimer = pendingJumpAt - now
+            }
+        }
+        if pendingJump && now >= pendingJumpAt {
+            if frontWin == nil || platform?.number == frontWin?.number {
+                pendingJump = false; approaching = false              // 이미 그 창 위
+            } else if state == .sleep && !awaySleep {
+                wakeUp()                                              // 낮잠이면 깨워서 다음 틱에
+            } else if [.idle, .walk, .dizzy, .notice, .watch].contains(state), goToFrontWindow() {
+                pendingJump = false
+            }   // 공중이면 착지 후 다시 시도
+        }
+
         var f = body
         let prevBottom = f.minY
         let area = (window.screen ?? NSScreen.main!).visibleFrame
@@ -471,15 +538,24 @@ final class Pet: NSObject {
             floorLo = max(floorLo, d.lowerBound); floorHi = min(floorHi, d.upperBound)
         }
 
-        // 발판 창 추적: 가로 이동은 따라가고, 닫힘·최소화되거나 발밑이 다른 창에 가려지면 떨어짐
+        // 발판 창 추적: 창이 조금이라도 움직이면(끌어서 옮김) 떨어지고, 닫힘·최소화되거나 발밑이 다른 창에 가려져도 떨어짐
         if let p = platform, !isAirborne {
             if let w = platformNow, w.number == p.number {
-                f.origin.x += w.frame.minX - p.frame.minX
+                if abs(w.frame.minX - p.frame.minX) > 0.5 || abs(w.frame.maxY - p.frame.maxY) > 0.5 {
+                    platform = nil
+                    dropThrough = w.number                            // 떨어지는 동안 이 창엔 다시 착지 안 함
+                    walkOffEdge = false; approaching = false; jumped = false
+                    if state == .sleep { wakeUp() }
+                    vx = 0; vy = 0
+                    setState(.fall)
+                }
+            }
+            if let w = platformNow, let p = platform, w.number == p.number {
                 platform = w
                 let foot = NSPoint(x: f.midX, y: w.frame.maxY - 1)
                 if platformAbove.contains(where: { $0.contains(foot) }) { platform = nil }
             } else {
-                platform = nil
+                if platform != nil { platform = nil }
             }
         }
 
@@ -514,7 +590,7 @@ final class Pet: NSObject {
             if vy < 0 && f.origin.y <= screenFloor {
                 land(&f, y: screenFloor, on: nil)                 // 화면 바닥이 항상 우선
                 f.origin.x = max(floorLo, min(f.origin.x, floorHi - f.width))
-            } else if let w = frontWin {
+            } else if let w = frontWin, w.number != dropThrough {
                 // 이전 틱 대비 상대 위치로 판정 (펫과 창이 같이 움직여도 통과하지 않게)
                 let prevTop = (prevWin?.number == w.number ? prevWin?.frame.maxY : nil) ?? w.frame.maxY
                 if prevBottom >= prevTop && f.minY <= w.frame.maxY
@@ -541,7 +617,10 @@ final class Pet: NSObject {
             if stateTimer <= 0 { wakeUp() }                       // 낮잠 끝
         case .notice:
             stateTimer -= dt
-            if stateTimer <= 0 { setState(.watch) }
+            if stateTimer <= 0 {
+                if pendingJump { vx = 0; setState(.idle); stateTimer = 5 }   // 창 알아챈 거면 바로 출발
+                else { setState(.watch) }
+            }
         case .watch:
             if now - lastMouseMove >= watchTimeout {              // 2초 조용하면 평소대로
                 facingLeft = watchLeft
