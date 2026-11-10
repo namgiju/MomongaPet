@@ -1,0 +1,5 @@
+build/
+.DS_Store
+__pycache__/
+# 캐릭터 이미지는 저작권 때문에 저장소에 올리지 않음 (각자 넣어서 사용)
+sprites/
