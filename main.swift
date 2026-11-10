@@ -36,7 +36,7 @@ let dockRangeFallback: ClosedRange<CGFloat>? = 106...1364
 let windowJumpChance = 0.15
 let walkOffEdgeChance = 0.10
 let jumpClearance: CGFloat = 40     // 창 상단보다 이만큼 더 높이 뛰어오름
-let hopRange: CGFloat = 60          // 창 높이 차가 이 이내(위·아래)면 가볍게 폴짝
+let hopRange: CGFloat = 60          // 창 높이 차가 이보다 작거나 아래 창이면 가볍게 폴짝
 let hopClearance: CGFloat = 15      // 폴짝 뛸 때 더 오르는 높이
 let jumpHeightLimit: CGFloat = 0.95  // 점프 높이(dy+여유)가 화면 높이의 이 비율 미만일 때만 점프
 let maxJumpDX: CGFloat = 300        // 창까지 가로 거리가 이보다 멀면 걸어서 다가간 뒤 점프
@@ -414,9 +414,8 @@ final class Pet: NSObject {
         let area = (window.screen ?? NSScreen.main!).visibleFrame
         let g = abs(gravity)
         let dy = w.frame.maxY - f.minY
-        let hop = abs(dy) <= hopRange                                 // 높이가 비슷하면 가볍게 폴짝 (조금 아래 창도 OK)
-        let h = hop ? hopClearance : jumpClearance
-        guard hop || dy > 0, dy + h < area.height * jumpHeightLimit,
+        let h = dy > hopRange ? jumpClearance : hopClearance          // 높은 창은 크게, 비슷하거나 낮은 창은 가볍게 폴짝 뛰어내림
+        guard dy + h < area.height * jumpHeightLimit,
               w.frame.maxY + h + f.height <= area.maxY else { return false }   // 천장에 부딪혀 궤도 틀어지지 않게
         let tx = jumpTargetX(w)
         let peak = max(dy, 0) + h                                     // 출발점 기준 최고 높이
