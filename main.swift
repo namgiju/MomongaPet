@@ -711,7 +711,12 @@ final class Pet: NSObject {
         // notice·watch 그림은 방향별로 따로 있어서 뒤집지 않음
         if state == .notice, let n = sprites.named("notice"), n.count >= 4 { frames = [n[noticeFrame]]; mirror = false }
         if state == .watch, let w = sprites.named(watchLeft ? "watchleft" : "watchright") { frames = w; mirror = false }
-        if state == .listen, let l = sprites.named(facingLeft ? "listenleft" : "listenright") { frames = l; mirror = false }
+        if state == .listen {
+            // 답을 기다리는 동안(일하는 중)엔 턱 괴고 생각하는 그림, 없으면 귀 기울이는 그림
+            let dir = facingLeft ? "left" : "right"
+            if assistant.busy, let t = sprites.named("think" + dir) { frames = t; mirror = false }
+            else if let l = sprites.named("listen" + dir) { frames = l; mirror = false }
+        }
         view.mirrored = mirror
         animAcc += dt
         let fps = state == .sleep ? sleepFPS : state == .walk ? walkFPS : state == .watch ? watchFPS : animFPS
@@ -830,9 +835,11 @@ final class Pet: NSObject {
         menu.addItem(withTitle: "스프라이트 폴더 열기", action: #selector(openFolder), keyEquivalent: "").target = self
         menu.addItem(withTitle: "스프라이트 다시 불러오기", action: #selector(reloadSprites), keyEquivalent: "").target = self
         menu.addItem(withTitle: "재우기", action: #selector(goSleep), keyEquivalent: "").target = self
-        if !AXIsProcessTrusted() {
-            menu.addItem(withTitle: "Dock 크기 자동 맞추기 (권한 필요)…", action: #selector(askAccessibility), keyEquivalent: "").target = self
-        }
+        // 손쉬운 사용 권한이 있으면 체크 표시, 없으면 눌러서 권한 요청
+        let ax = menu.addItem(withTitle: AXIsProcessTrusted() ? "Dock 크기 자동 맞추기" : "Dock 크기 자동 맞추기 (손쉬운 사용 권한 필요)…",
+                              action: #selector(askAccessibility), keyEquivalent: "")
+        ax.target = self
+        ax.state = AXIsProcessTrusted() ? .on : .off
         menu.addItem(.separator())
         menu.addItem(withTitle: "종료", action: #selector(quit), keyEquivalent: "").target = self
         NSMenu.popUpContextMenu(menu, with: e, for: v)
