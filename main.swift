@@ -904,26 +904,49 @@ final class KeyPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
 
+// 펫 그림과 같은 색: 갈색 외곽선, 크림색 바탕
+let inkColor = NSColor(srgbRed: 0.29, green: 0.09, blue: 0.04, alpha: 1)
+let paperColor = NSColor(srgbRed: 1.0, green: 0.99, blue: 0.96, alpha: 1)
+
+/// 둥근 시스템 글꼴 (SF Pro Rounded)
+func roundedFont(_ size: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
+    let base = NSFont.systemFont(ofSize: size, weight: weight)
+    guard let d = base.fontDescriptor.withDesign(.rounded) else { return base }
+    return NSFont(descriptor: d, size: size) ?? base
+}
+
+/// 아래로 꼬리가 달린 말풍선 모양 (말풍선·입력창 공용)
 final class BubbleView: NSView {
-    static let tailH: CGFloat = 7
+    static let tailH: CGFloat = 8
+    static let radius: CGFloat = 13
+    static let lineW: CGFloat = 2
     var tailX: CGFloat = 0 { didSet { if oldValue != tailX { needsDisplay = true } } }
     var onClick: (() -> Void)?
+    var passesClicks = false            // 입력창: 안쪽 텍스트 칸이 클릭을 받도록
 
     override func draw(_ dirtyRect: NSRect) {
-        let t = BubbleView.tailH
-        let box = NSBezierPath(roundedRect: NSRect(x: 0.5, y: t + 0.5, width: bounds.width - 1, height: bounds.height - t - 1),
-                               xRadius: 9, yRadius: 9)
-        let x = max(12, min(tailX, bounds.width - 12))
-        let tail = NSBezierPath()
-        tail.move(to: NSPoint(x: x - 6, y: t + 1.5)); tail.line(to: NSPoint(x: x, y: 0.5)); tail.line(to: NSPoint(x: x + 6, y: t + 1.5))
-        NSColor.white.setFill(); box.fill(); tail.fill()
-        NSColor(white: 0.55, alpha: 1).setStroke()
-        box.lineWidth = 1; box.stroke()
-        NSColor.white.setFill(); NSRect(x: x - 5.5, y: t - 0.5, width: 11, height: 2.5).fill()   // 꼬리와 몸통 사이 선 지우기
-        NSColor(white: 0.55, alpha: 1).setStroke()
-        tail.lineWidth = 1; tail.stroke()
+        let t = BubbleView.tailH, r = BubbleView.radius, lw = BubbleView.lineW
+        let b = NSRect(x: lw / 2, y: t + lw / 2, width: bounds.width - lw, height: bounds.height - t - lw)
+        let x = max(b.minX + r + 7, min(tailX, b.maxX - r - 7))
+        // 몸통과 꼬리를 한 선으로 이어 그림
+        let path = NSBezierPath()
+        path.move(to: NSPoint(x: b.minX + r, y: b.minY))
+        path.line(to: NSPoint(x: x - 7, y: b.minY))
+        path.line(to: NSPoint(x: x, y: lw + 0.5))
+        path.line(to: NSPoint(x: x + 5, y: b.minY))
+        path.appendArc(withCenter: NSPoint(x: b.maxX - r, y: b.minY + r), radius: r, startAngle: 270, endAngle: 360)
+        path.appendArc(withCenter: NSPoint(x: b.maxX - r, y: b.maxY - r), radius: r, startAngle: 0, endAngle: 90)
+        path.appendArc(withCenter: NSPoint(x: b.minX + r, y: b.maxY - r), radius: r, startAngle: 90, endAngle: 180)
+        path.appendArc(withCenter: NSPoint(x: b.minX + r, y: b.minY + r), radius: r, startAngle: 180, endAngle: 270)
+        path.close()
+        path.lineJoinStyle = .round
+        path.lineWidth = lw
+        paperColor.setFill(); path.fill()
+        inkColor.setStroke(); path.stroke()
     }
-    override func hitTest(_ p: NSPoint) -> NSView? { frame.contains(p) ? self : nil }
+    override func hitTest(_ p: NSPoint) -> NSView? {
+        passesClicks ? super.hitTest(p) : (frame.contains(p) ? self : nil)
+    }
     override func mouseDown(with e: NSEvent) { onClick?() }
 }
 
@@ -933,7 +956,7 @@ final class Bubble {
     let panel: NSPanel
     let view = BubbleView()
     let label = NSTextField(wrappingLabelWithString: "")
-    let font = NSFont.systemFont(ofSize: 12)
+    let font = roundedFont(13, weight: .medium)
     var isVisible: Bool { panel.isVisible }
 
     init() {
@@ -946,7 +969,7 @@ final class Bubble {
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
         label.font = font
-        label.textColor = .black
+        label.textColor = inkColor
         label.isSelectable = false
         view.addSubview(label)
         panel.contentView = view
@@ -957,8 +980,8 @@ final class Bubble {
             .boundingRect(with: NSSize(width: bubbleMaxWidth, height: 2000), options: [.usesLineFragmentOrigin, .usesFontLeading])
         let w = ceil(r.width) + 6, h = ceil(r.height) + 2
         label.stringValue = text
-        label.frame = NSRect(x: 10, y: BubbleView.tailH + 7, width: w, height: h)
-        panel.setContentSize(NSSize(width: w + 20, height: h + 14 + BubbleView.tailH))
+        label.frame = NSRect(x: 12, y: BubbleView.tailH + 9, width: w, height: h)
+        panel.setContentSize(NSSize(width: w + 24, height: h + 18 + BubbleView.tailH))
         view.needsDisplay = true
         panel.orderFrontRegardless()
     }
@@ -1007,7 +1030,7 @@ final class Assistant: NSObject, NSTextFieldDelegate, NSWindowDelegate {
 
     init(pet: Pet) {
         self.pet = pet
-        input = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: 280, height: 30),
+        input = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: 300, height: 38 + BubbleView.tailH),
                          styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         super.init()
         input.isOpaque = false
@@ -1017,12 +1040,20 @@ final class Assistant: NSObject, NSTextFieldDelegate, NSWindowDelegate {
         input.level = .floating
         input.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         input.delegate = self
-        field.frame = NSRect(x: 0, y: 3, width: 280, height: 24)
-        field.bezelStyle = .roundedBezel
-        field.font = .systemFont(ofSize: 13)
-        field.placeholderString = "모몽가에게 시킬 일 (Enter 보내기, Esc 닫기)"
+        let font = roundedFont(13, weight: .medium)
+        field.frame = NSRect(x: 15, y: BubbleView.tailH + 10, width: 270, height: 19)
+        field.isBordered = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.usesSingleLineMode = true
+        field.cell?.isScrollable = true
+        field.font = font
+        field.textColor = inkColor
+        field.placeholderAttributedString = NSAttributedString(string: "모몽가에게 말 걸기…",
+            attributes: [.font: font, .foregroundColor: inkColor.withAlphaComponent(0.4)])
         field.delegate = self
-        let box = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 30))
+        let box = BubbleView(frame: NSRect(x: 0, y: 0, width: 300, height: 38 + BubbleView.tailH))
+        box.passesClicks = true
         box.addSubview(field)
         input.contentView = box
         registerHotKey()
@@ -1116,8 +1147,9 @@ final class Assistant: NSObject, NSTextFieldDelegate, NSWindowDelegate {
         let s = input.frame.size
         let area = (NSScreen.screens.first { $0.frame.intersects(body) } ?? NSScreen.main!).visibleFrame
         let o = NSPoint(x: round(max(area.minX, min(body.midX - s.width / 2, area.maxX - s.width))),
-                        y: round(min(body.maxY + 4, area.maxY - s.height)))
+                        y: round(min(body.maxY + 2, area.maxY - s.height)))
         if input.frame.origin != o { input.setFrameOrigin(o) }
+        (input.contentView as? BubbleView)?.tailX = body.midX - o.x
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
@@ -1319,8 +1351,9 @@ final class Assistant: NSObject, NSTextFieldDelegate, NSWindowDelegate {
             if dots != lastDots {
                 lastDots = dots
                 bubble.view.onClick = nil
+                let secs = Int(now - thinkingSince)
                 bubble.show("생각 중" + String(repeating: ".", count: dots) + String(repeating: " ", count: 3 - dots)
-                            + "  \(Int(now - thinkingSince))초")
+                            + (secs >= 5 ? "  \(secs)초" : ""))
             }
         } else if bubble.isVisible && now >= hideAt {
             bubble.hide()
