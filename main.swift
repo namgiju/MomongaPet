@@ -1,4 +1,5 @@
 import Cocoa
+import Carbon
 
 // MARK: - 설정
 // 사용자 스프라이트 폴더가 있으면 우선, 없으면 앱 안에 들어 있는 기본 스프라이트 사용
@@ -274,6 +275,10 @@ final class Pet: NSObject {
     var pressIsJump = false
     var dragSamples: [(t: Double, p: NSPoint)] = []
 
+    var assistant: Assistant!
+    var pendingTalk: DispatchWorkItem?      // 한 번 클릭 → 더블클릭 간격만큼 기다렸다 말 걸기
+    var pressWoke = false                   // 이번 클릭으로 깨웠으면 말 걸기 안 함
+
     /// 펫 몸통(발 아래 왼쪽 기준) 사각형. 창은 여기서 좌우·위로 여백만큼 큼
     /// 창 위치는 정수로 버림되므로(1pt 미만 이동이 사라짐) 실제 위치는 소수점까지 따로 보관.
     /// 드래그 등으로 창이 다른 곳으로 옮겨졌으면 창 위치를 따름
@@ -311,6 +316,7 @@ final class Pet: NSObject {
         window.contentView = view
         view.pet = self
         window.orderFrontRegardless()
+        assistant = Assistant(pet: self)
 
         let t = Timer(timeInterval: 1.0 / 60, target: self, selector: #selector(tick), userInfo: nil, repeats: true)
         RunLoop.main.add(t, forMode: .common)
@@ -465,6 +471,7 @@ final class Pet: NSObject {
         let now = ProcessInfo.processInfo.systemUptime
         let dt = min(now - lastTick, 0.05)
         lastTick = now
+        assistant.update(now: now, body: body)
 
         // Dock 범위 (2초 간격)
         if now - lastDockPoll >= 2 {
@@ -692,6 +699,17 @@ final class Pet: NSObject {
         view.image = frames[frameIdx]
     }
 
+    /// 비서 답이 왔을 때: 자고 있으면 깨고, 아니면 "!" 하고 잠깐 쳐다봄
+    func react() {
+        if state == .sleep { wakeUp(); return }
+        guard state == .idle || state == .walk || state == .watch else { return }
+        noticeFrame = (state == .walk ? 2 : 0) + (facingLeft ? 0 : 1)
+        vx = 0; walkOffEdge = false
+        lastMouseMove = ProcessInfo.processInfo.systemUptime
+        setState(.notice)
+        stateTimer = noticeDuration
+    }
+
     // MARK: 마우스
     func mouseDown(_ e: NSEvent) {
         let m = NSEvent.mouseLocation
@@ -699,9 +717,12 @@ final class Pet: NSObject {
         dragOffset = NSPoint(x: m.x - window.frame.minX, y: m.y - window.frame.minY)
         dragSamples = [(ProcessInfo.processInfo.systemUptime, window.frame.origin)]
         pressIsJump = e.clickCount >= 2
+        pressWoke = false
+        if pressIsJump { pendingTalk?.cancel(); pendingTalk = nil }   // 더블클릭이면 말 걸기 취소
 
         if state == .sleep && !pressIsJump {
             wakeUp()                                    // 콕 찌르면 깸
+            pressWoke = true
             return
         }
         if pressIsJump && state != .fall && state != .jump {
@@ -734,7 +755,17 @@ final class Pet: NSObject {
     }
 
     func mouseUp(_ e: NSEvent) {
-        guard state == .drag else { return }
+        guard state == .drag else {
+            // 한 번 클릭: 더블클릭이 아닌 게 확실해지면 말 걸기 창 열기/닫기
+            if e.clickCount == 1 && !pressWoke {
+                let work = DispatchWorkItem { [weak self] in
+                    MainActor.assumeIsolated { self?.pendingTalk = nil; self?.assistant.toggleInput() }
+                }
+                pendingTalk = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + NSEvent.doubleClickInterval, execute: work)
+            }
+            return
+        }
         // 최근 0.1초 동안의 이동만으로 던지는 속도 계산 (멈췄다 놓으면 0)
         let now = ProcessInfo.processInfo.systemUptime
         let recent = dragSamples.filter { now - $0.t <= 0.1 }
@@ -751,6 +782,16 @@ final class Pet: NSObject {
     // MARK: 메뉴
     func showMenu(_ e: NSEvent, in v: NSView) {
         let menu = NSMenu()
+        if assistant.busy {
+            menu.addItem(withTitle: "하던 일 그만두기", action: #selector(cancelTask), keyEquivalent: "").target = self
+        } else {
+            menu.addItem(withTitle: "말 걸기…", action: #selector(talk), keyEquivalent: "").target = self
+        }
+        if assistant.sessionID != nil {
+            menu.addItem(withTitle: "새 대화 시작", action: #selector(newChat), keyEquivalent: "").target = self
+        }
+        menu.addItem(withTitle: "말투 바꾸기…", action: #selector(Assistant.editPersona), keyEquivalent: "").target = assistant
+        menu.addItem(.separator())
         menu.addItem(withTitle: "스프라이트 폴더 열기", action: #selector(openFolder), keyEquivalent: "").target = self
         menu.addItem(withTitle: "스프라이트 다시 불러오기", action: #selector(reloadSprites), keyEquivalent: "").target = self
         menu.addItem(withTitle: "재우기", action: #selector(goSleep), keyEquivalent: "").target = self
@@ -784,8 +825,376 @@ final class Pet: NSObject {
         _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
     }
-    @objc func quit() { NSApp.terminate(nil) }
+    @objc func talk() { assistant.ask() }
+    @objc func cancelTask() { assistant.cancel() }
+    @objc func newChat() { assistant.newChat() }
+    @objc func quit() {
+        assistant.process?.terminate()                  // 하던 claude 작업도 같이 끝냄
+        NSApp.terminate(nil)
+    }
 }
+
+// MARK: - 비서 (Claude Code CLI)
+// 우클릭 → "말 걸기"로 일을 시키면 `claude -p`를 백그라운드로 실행하고 답을 말풍선으로 보여 줌.
+// 대화는 세션 ID로 이어지고, 말투는 ~/MomongaPet/persona.txt 로 바꿀 수 있음
+let petHome = (NSHomeDirectory() as NSString).appendingPathComponent("MomongaPet")
+let personaPath = (petHome as NSString).appendingPathComponent("persona.txt")
+let lastReplyPath = (petHome as NSString).appendingPathComponent("last_reply.txt")
+let claudePermissionMode = "auto"       // 위험해 보이는 동작은 Claude Code가 스스로 막음
+let bubbleMaxChars = 240                // 이보다 긴 답은 잘라 보여 주고, 말풍선을 누르면 전체를 엶
+let bubbleMaxWidth: CGFloat = 240
+let talkHotKey = (code: UInt32(kVK_ANSI_M), mods: UInt32(controlKey | optionKey))   // ⌃⌥M: 어디서든 말 걸기
+let defaultPersona = """
+너는 사용자의 macOS 화면 아래에 사는 작은 모몽가 펫이자 비서야.
+반말로 귀엽고 다정하게 말해.
+답은 펫 머리 위 말풍선에 뜨니까 보통 1~3문장으로 짧게 하고, 마크다운 표·코드 블록·제목은 쓰지 마.
+일을 시키면 직접 처리하고, 끝나면 무엇을 했는지만 짧게 알려 줘.
+"""
+
+/// 앱을 앞으로 가져오지 않고도 키 입력을 받을 수 있는 패널
+final class KeyPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+}
+
+final class BubbleView: NSView {
+    static let tailH: CGFloat = 7
+    var tailX: CGFloat = 0 { didSet { if oldValue != tailX { needsDisplay = true } } }
+    var onClick: (() -> Void)?
+
+    override func draw(_ dirtyRect: NSRect) {
+        let t = BubbleView.tailH
+        let box = NSBezierPath(roundedRect: NSRect(x: 0.5, y: t + 0.5, width: bounds.width - 1, height: bounds.height - t - 1),
+                               xRadius: 9, yRadius: 9)
+        let x = max(12, min(tailX, bounds.width - 12))
+        let tail = NSBezierPath()
+        tail.move(to: NSPoint(x: x - 6, y: t + 1.5)); tail.line(to: NSPoint(x: x, y: 0.5)); tail.line(to: NSPoint(x: x + 6, y: t + 1.5))
+        NSColor.white.setFill(); box.fill(); tail.fill()
+        NSColor(white: 0.55, alpha: 1).setStroke()
+        box.lineWidth = 1; box.stroke()
+        NSColor.white.setFill(); NSRect(x: x - 5.5, y: t - 0.5, width: 11, height: 2.5).fill()   // 꼬리와 몸통 사이 선 지우기
+        NSColor(white: 0.55, alpha: 1).setStroke()
+        tail.lineWidth = 1; tail.stroke()
+    }
+    override func hitTest(_ p: NSPoint) -> NSView? { frame.contains(p) ? self : nil }
+    override func mouseDown(with e: NSEvent) { onClick?() }
+}
+
+/// 펫 머리 위 말풍선
+@MainActor
+final class Bubble {
+    let panel: NSPanel
+    let view = BubbleView()
+    let label = NSTextField(wrappingLabelWithString: "")
+    let font = NSFont.systemFont(ofSize: 12)
+    var isVisible: Bool { panel.isVisible }
+
+    init() {
+        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 10, height: 10),
+                        styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.hidesOnDeactivate = false
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
+        label.font = font
+        label.textColor = .black
+        label.isSelectable = false
+        view.addSubview(label)
+        panel.contentView = view
+    }
+
+    func show(_ text: String) {
+        let r = NSAttributedString(string: text, attributes: [.font: font])
+            .boundingRect(with: NSSize(width: bubbleMaxWidth, height: 2000), options: [.usesLineFragmentOrigin, .usesFontLeading])
+        let w = ceil(r.width) + 6, h = ceil(r.height) + 2
+        label.stringValue = text
+        label.frame = NSRect(x: 10, y: BubbleView.tailH + 7, width: w, height: h)
+        panel.setContentSize(NSSize(width: w + 20, height: h + 14 + BubbleView.tailH))
+        view.needsDisplay = true
+        panel.orderFrontRegardless()
+    }
+
+    func hide() { panel.orderOut(nil) }
+
+    /// 펫 몸통 위로 (화면 밖으로 나가지 않게)
+    func place(above body: NSRect) {
+        let s = panel.frame.size
+        let area = (NSScreen.screens.first { $0.frame.intersects(body) } ?? NSScreen.main!).visibleFrame
+        let x = max(area.minX, min(body.midX - s.width / 2, area.maxX - s.width))
+        let y = min(body.maxY + 2, area.maxY - s.height)
+        let o = NSPoint(x: round(x), y: round(y))
+        if panel.frame.origin != o { panel.setFrameOrigin(o) }
+        view.tailX = body.midX - o.x
+    }
+}
+
+@MainActor
+final class Assistant: NSObject, NSTextFieldDelegate, NSWindowDelegate {
+    weak var pet: Pet?
+    let bubble = Bubble()
+    let input: KeyPanel
+    let field = NSTextField()
+    var process: Process?
+    var busy: Bool { process != nil }
+    var thinkingSince = 0.0
+    var lastDots = -1
+    var hideAt = Double.infinity
+    var loginPATH: String?
+
+    var sessionID: String? {
+        get { UserDefaults.standard.string(forKey: "claudeSessionID") }
+        set { UserDefaults.standard.set(newValue, forKey: "claudeSessionID") }
+    }
+
+    init(pet: Pet) {
+        self.pet = pet
+        input = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: 280, height: 30),
+                         styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        super.init()
+        input.isOpaque = false
+        input.backgroundColor = .clear
+        input.hasShadow = true
+        input.hidesOnDeactivate = false
+        input.level = .floating
+        input.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+        input.delegate = self
+        field.frame = NSRect(x: 0, y: 3, width: 280, height: 24)
+        field.bezelStyle = .roundedBezel
+        field.font = .systemFont(ofSize: 13)
+        field.placeholderString = "모몽가에게 시킬 일 (Enter 보내기, Esc 닫기)"
+        field.delegate = self
+        let box = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 30))
+        box.addSubview(field)
+        input.contentView = box
+        registerHotKey()
+
+        // 앱은 로그인 셸의 PATH를 모름 → claude와 그 도구들이 쓸 PATH를 미리 읽어 둠
+        DispatchQueue.global(qos: .utility).async {
+            let path = Assistant.readLoginPATH()
+            DispatchQueue.main.async { MainActor.assumeIsolated { self.loginPATH = path } }
+        }
+    }
+
+    nonisolated static func readLoginPATH() -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        p.arguments = ["-lc", "printf %s \"$PATH\""]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        p.standardInput = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        let d = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        let s = String(decoding: d, as: UTF8.self)
+        return s.isEmpty ? nil : s
+    }
+
+    var environment: [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let home = NSHomeDirectory()
+        env["PATH"] = loginPATH ?? "\(home)/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        return env
+    }
+
+    func claudePath() -> String? {
+        let dirs = (environment["PATH"] ?? "").split(separator: ":").map(String.init) + ["\(NSHomeDirectory())/.local/bin"]
+        return dirs.map { ($0 as NSString).appendingPathComponent("claude") }
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    func loadPersona() -> String {
+        let s = (try? String(contentsOfFile: personaPath, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return s.isEmpty ? defaultPersona : s
+    }
+
+    // MARK: 입력창
+    func ask() {
+        guard !busy else { return }
+        bubble.hide()
+        field.stringValue = ""
+        if let p = pet { placeInput(above: p.body) }
+        input.makeKeyAndOrderFront(nil)
+        input.makeFirstResponder(field)
+    }
+
+    func closeInput() { input.orderOut(nil) }
+
+    func toggleInput() { input.isVisible ? closeInput() : ask() }
+
+    /// 어디서든 단축키로 말 걸기 창 열기/닫기 (Carbon 핫키는 별도 권한 없이 동작)
+    func registerHotKey() {
+        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), { _, _, ctx in
+            guard let ctx else { return noErr }
+            let a = Unmanaged<Assistant>.fromOpaque(ctx).takeUnretainedValue()
+            MainActor.assumeIsolated { a.toggleInput() }
+            return noErr
+        }, 1, &spec, Unmanaged.passUnretained(self).toOpaque(), nil)
+        var ref: EventHotKeyRef?
+        RegisterEventHotKey(talkHotKey.code, talkHotKey.mods, EventHotKeyID(signature: OSType(0x4D4D4E47), id: 1),
+                            GetApplicationEventTarget(), 0, &ref)
+    }
+
+    func placeInput(above body: NSRect) {
+        let s = input.frame.size
+        let area = (NSScreen.screens.first { $0.frame.intersects(body) } ?? NSScreen.main!).visibleFrame
+        let o = NSPoint(x: round(max(area.minX, min(body.midX - s.width / 2, area.maxX - s.width))),
+                        y: round(min(body.maxY + 4, area.maxY - s.height)))
+        if input.frame.origin != o { input.setFrameOrigin(o) }
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
+        if sel == #selector(NSResponder.insertNewline(_:)) {
+            let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            closeInput()
+            if !text.isEmpty {
+                // 말투가 바뀌었으면 예전 말투로 쌓인 대화에 끌려가지 않게 새 대화로 시작
+                let persona = loadPersona()
+                if UserDefaults.standard.string(forKey: "claudeSessionPersona") != persona {
+                    sessionID = nil
+                    UserDefaults.standard.set(persona, forKey: "claudeSessionPersona")
+                }
+                run(text, resume: sessionID)
+            }
+            return true
+        }
+        if sel == #selector(NSResponder.cancelOperation(_:)) { closeInput(); return true }
+        return false
+    }
+
+    func windowDidResignKey(_ n: Notification) { closeInput() }   // 다른 곳을 누르면 닫힘
+
+    // MARK: 실행
+    func run(_ prompt: String, resume: String?) {
+        guard let exe = claudePath() else {
+            say("claude 명령을 못 찾았어… Claude Code가 설치돼 있는지 봐 줘!", seconds: 8)
+            return
+        }
+        var args = ["-p", prompt,
+                    "--permission-mode", claudePermissionMode,
+                    "--append-system-prompt", loadPersona(),
+                    "--output-format", "json"]
+        if let r = resume { args += ["--resume", r] }
+
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: exe)
+        p.arguments = args
+        p.currentDirectoryURL = URL(fileURLWithPath: NSHomeDirectory())
+        p.environment = environment
+        p.standardInput = FileHandle.nullDevice
+        let out = Pipe(), err = Pipe()
+        p.standardOutput = out
+        p.standardError = err
+        do { try p.run() } catch {
+            say("실행을 못 했어… \(error.localizedDescription)", seconds: 8)
+            return
+        }
+        process = p
+        thinkingSince = ProcessInfo.processInfo.systemUptime
+        lastDots = -1
+        hideAt = .infinity
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            // stdout·stderr를 동시에 읽어야 한쪽 버퍼가 차서 멈추는 일이 없음
+            let errBox = DataBox()
+            let g = DispatchGroup()
+            g.enter()
+            DispatchQueue.global().async { errBox.data = err.fileHandleForReading.readDataToEndOfFile(); g.leave() }
+            let outData = out.fileHandleForReading.readDataToEndOfFile()
+            g.wait()
+            p.waitUntilExit()
+            let errData = errBox.data
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self.finished(p, out: outData, err: errData, prompt: prompt, resumed: resume != nil) }
+            }
+        }
+    }
+
+    func finished(_ p: Process, out: Data, err: Data, prompt: String, resumed: Bool) {
+        guard p === process else { return }                 // 취소된 작업
+        process = nil
+        let json = (try? JSONSerialization.jsonObject(with: out)) as? [String: Any]
+        let result = ((json?["result"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let failed = json == nil || (json?["is_error"] as? Bool ?? false) || result.isEmpty
+        if failed && resumed {
+            // 이전 대화를 못 이어가면(세션이 지워졌거나 등) 새 대화로 한 번 더
+            sessionID = nil
+            run(prompt, resume: nil)
+            return
+        }
+        if failed {
+            let raw = result.isEmpty
+                ? String(decoding: err.isEmpty ? out : err, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+                : result
+            say("앗, 잘 안 됐어… " + String(raw.prefix(160)), seconds: 10)
+        } else {
+            if let sid = json?["session_id"] as? String { sessionID = sid }
+            say(result)
+        }
+        pet?.react()
+    }
+
+    func cancel() {
+        guard let p = process else { return }
+        process = nil
+        p.terminate()
+        say("알았어, 그만할게!", seconds: 3)
+    }
+
+    func newChat() {
+        sessionID = nil
+        say("새로 시작하자!", seconds: 3)
+    }
+
+    // MARK: 말풍선
+    /// 답을 말풍선에 띄움. 길면 잘라 보여 주고, 전체는 파일로 저장해 말풍선을 누르면 엶
+    func say(_ text: String, seconds: Double? = nil) {
+        var t = text.replacingOccurrences(of: "**", with: "").replacingOccurrences(of: "`", with: "")
+        t = t.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.drop { $0 == "#" }.trimmingCharacters(in: .whitespaces) }
+            .joined(separator: "\n")
+        try? FileManager.default.createDirectory(atPath: petHome, withIntermediateDirectories: true)
+        try? (text + "\n").write(toFile: lastReplyPath, atomically: true, encoding: .utf8)
+        let long = t.count > bubbleMaxChars
+        if long { t = String(t.prefix(bubbleMaxChars)) + "…\n(눌러서 전체 보기)" }
+        bubble.view.onClick = { [weak self] in
+            if long { NSWorkspace.shared.open(URL(fileURLWithPath: lastReplyPath)) }
+            self?.bubble.hide()
+        }
+        bubble.show(t)
+        if let p = pet { bubble.place(above: p.body) }
+        hideAt = ProcessInfo.processInfo.systemUptime + (seconds ?? min(25, max(5, Double(t.count) * 0.12)))
+    }
+
+    /// 매 틱: 말풍선·입력창이 펫을 따라다니고, 일하는 동안 "생각 중" 표시
+    func update(now: Double, body: NSRect) {
+        if busy {
+            let dots = Int((now - thinkingSince) / 0.5) % 4
+            if dots != lastDots {
+                lastDots = dots
+                bubble.view.onClick = nil
+                bubble.show("생각 중" + String(repeating: ".", count: dots) + String(repeating: " ", count: 3 - dots)
+                            + "  \(Int(now - thinkingSince))초")
+            }
+        } else if bubble.isVisible && now >= hideAt {
+            bubble.hide()
+        }
+        if bubble.isVisible { bubble.place(above: body) }
+        if input.isVisible { placeInput(above: body) }
+    }
+
+    @objc func editPersona() {
+        try? FileManager.default.createDirectory(atPath: petHome, withIntermediateDirectories: true)
+        if !FileManager.default.fileExists(atPath: personaPath) {
+            try? (defaultPersona + "\n").write(toFile: personaPath, atomically: true, encoding: .utf8)
+        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: personaPath))
+    }
+}
+
+final class DataBox: @unchecked Sendable { var data = Data() }
 
 // MARK: - 실행
 let app = NSApplication.shared
