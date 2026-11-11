@@ -54,7 +54,7 @@ let padX = ceil(petSize.height * 0.2)
 let padTop = ceil(petSize.height * 0.1)
 let windowSize = NSSize(width: petSize.width + padX * 2, height: petSize.height + padTop)
 
-enum PetState: String { case idle, walk, drag, fall, jump, sleep, dizzy, notice, watch }
+enum PetState: String { case idle, walk, drag, fall, jump, sleep, dizzy, notice, watch, listen }
 
 // MARK: - 스프라이트 로더
 // 파일명 규칙: idle_01.png, walk_01.png, walk_02.png ... (없는 상태는 idle로 대체)
@@ -538,6 +538,18 @@ final class Pet: NSObject {
             }   // 공중이거나 헤롱헤롱 중이면 끝난 뒤 다시 시도
         }
 
+        // 말 거는 중(입력창이 열렸거나 답을 기다림)엔 멈춰서 귀 기울이기
+        let listening = assistant.input.isVisible || assistant.busy
+        if listening {
+            if [.idle, .walk, .notice, .watch, .dizzy, .sleep].contains(state) {
+                awaySleep = false
+                vx = 0; walkOffEdge = false; approaching = false
+                setState(.listen)
+            }
+        } else if state == .listen {
+            decide()
+        }
+
         var f = body
         let prevBottom = f.minY
         let area = (window.screen ?? NSScreen.main!).visibleFrame
@@ -631,6 +643,8 @@ final class Pet: NSObject {
                     stateTimer = pendingJumpAt - now
                 } else { decide() }
             }
+        case .listen:
+            break                                                 // 대화가 끝날 때까지 가만히
         case .sleep:
             stateTimer -= dt
             if stateTimer <= 0 { wakeUp() }                       // 낮잠 끝
@@ -651,7 +665,7 @@ final class Pet: NSObject {
         if let p = platform, f.midX < p.frame.minX || f.midX > p.frame.maxX { platform = nil }
 
         // 서 있는 상태: 바닥(창 상단 또는 화면 바닥)에 붙이기
-        if state == .idle || state == .walk || state == .sleep || state == .dizzy || state == .notice || state == .watch {
+        if state == .idle || state == .walk || state == .sleep || state == .dizzy || state == .notice || state == .watch || state == .listen {
             let ground = platform?.frame.maxY ?? screenFloor
             let gap = f.minY - ground
             if gap <= 1 {
@@ -669,7 +683,7 @@ final class Pet: NSObject {
             }
         }
         f.origin.x = max(area.minX, min(f.origin.x, area.maxX - f.width))
-        if platform == nil && (state == .idle || state == .walk || state == .sleep || state == .dizzy || state == .notice || state == .watch) {
+        if platform == nil && (state == .idle || state == .walk || state == .sleep || state == .dizzy || state == .notice || state == .watch || state == .listen) {
             f.origin.x = max(floorLo, min(f.origin.x, floorHi - f.width))
         }
         if f.origin != body.origin { body = f }
@@ -684,6 +698,7 @@ final class Pet: NSObject {
         // notice·watch 그림은 방향별로 따로 있어서 뒤집지 않음
         if state == .notice, let n = sprites.named("notice"), n.count >= 4 { frames = [n[noticeFrame]]; mirror = false }
         if state == .watch, let w = sprites.named(watchLeft ? "watchleft" : "watchright") { frames = w; mirror = false }
+        if state == .listen, let l = sprites.named(facingLeft ? "listenleft" : "listenright") { frames = l; mirror = false }
         view.mirrored = mirror
         animAcc += dt
         let fps = state == .sleep ? sleepFPS : state == .walk ? walkFPS : state == .watch ? watchFPS : animFPS
@@ -702,7 +717,7 @@ final class Pet: NSObject {
     /// 비서 답이 왔을 때: 자고 있으면 깨고, 아니면 "!" 하고 잠깐 쳐다봄
     func react() {
         if state == .sleep { wakeUp(); return }
-        guard state == .idle || state == .walk || state == .watch else { return }
+        guard state == .idle || state == .walk || state == .watch || state == .listen else { return }
         noticeFrame = (state == .walk ? 2 : 0) + (facingLeft ? 0 : 1)
         vx = 0; walkOffEdge = false
         lastMouseMove = ProcessInfo.processInfo.systemUptime
