@@ -1,5 +1,6 @@
 import Cocoa
 import Carbon
+import Network
 
 // MARK: - 설정
 // 사용자 스프라이트 폴더가 있으면 우선, 없으면 앱 안에 들어 있는 기본 스프라이트 사용
@@ -250,6 +251,8 @@ final class Pet: NSObject {
     var sysIdle = 0.0
     var lastIdlePoll = 0.0
     var lastWake = -Double.infinity
+    var bootNap = true                  // 앱을 켜거나 맥이 깨어난 직후의 잠: 인터넷이 붙고 사용자가 있으면 스스로 깸
+    var bootNapAt = 0.0
 
     // Dock
     var dockRange = dockRangeFallback
@@ -343,6 +346,7 @@ final class Pet: NSObject {
     /// 깨어나면 잠깐 멍하니 있다가 평소대로
     func wakeUp() {
         awaySleep = false
+        bootNap = false
         lastWake = ProcessInfo.processInfo.systemUptime
         vx = 0
         setState(.idle)
@@ -456,6 +460,10 @@ final class Pet: NSObject {
         walkOffEdge = false
         if let w { f.origin.x = max(w.frame.minX, min(f.origin.x, w.frame.maxX - f.width)) }
         if isAway { sleep(away: true); return }
+        if bootNap {                                    // 켜지자마자 내려와서 잠
+            bootNapAt = ProcessInfo.processInfo.systemUptime
+            sleep(away: false); return
+        }
         if jumped {
             jumped = false
             setState(.idle)
@@ -494,6 +502,11 @@ final class Pet: NSObject {
             lastIdlePoll = now
             let prev = sysIdle
             sysIdle = systemIdleSeconds()
+            // 켜거나 깨어난 직후의 잠: 인터넷이 붙고 사용자가 자리에 있으면 일어남 (그 뒤 인사)
+            if bootNap && state == .sleep && assistant.online && sysIdle < presentIdle && now - bootNapAt >= wakeGreetDelay {
+                wakeUp()
+            }
+            assistant.considerChat(now: now, idle: sysIdle)
             if state == .sleep && awaySleep && (sysIdle < 1 || sysIdle < prev) { wakeUp() }
             else if isAway && (state == .idle || state == .walk || state == .dizzy || state == .watch) { sleep(away: true) }
         }
@@ -714,6 +727,13 @@ final class Pet: NSObject {
         view.image = frames[frameIdx]
     }
 
+    /// 맥이 잠자기에서 깨어났을 때: 일단 자면서 인터넷 연결을 기다림
+    func startBootNap() {
+        bootNap = true
+        bootNapAt = ProcessInfo.processInfo.systemUptime
+        if !isAirborne && state != .drag && state != .listen { sleep(away: false) }   // 공중이면 내려앉은 뒤 잠
+    }
+
     /// 비서 답이 왔을 때: 자고 있으면 깨고, 아니면 "!" 하고 잠깐 쳐다봄
     func react() {
         if state == .sleep { wakeUp(); return }
@@ -845,6 +865,7 @@ final class Pet: NSObject {
     @objc func newChat() { assistant.newChat() }
     @objc func quit() {
         assistant.process?.terminate()                  // 하던 claude 작업도 같이 끝냄
+        assistant.chatProcess?.terminate()
         NSApp.terminate(nil)
     }
 }
@@ -860,6 +881,17 @@ let claudeModel = "haiku"               // 가볍게: haiku, 일을 더 잘하�
 let bubbleMaxChars = 240                // 이보다 긴 답은 잘라 보여 주고, 말풍선을 누르면 전체를 엶
 let bubbleMaxWidth: CGFloat = 240
 let talkHotKey = (code: UInt32(kVK_ANSI_M), mods: UInt32(controlKey | optionKey))   // ⌃⌥M: 어디서든 말 걸기
+
+// 먼저 말 걸기: 사용자가 자리에 있을 때, 의미 있는 순간에만 (가벼운 호출: 도구·기본 프롬프트 없이 한마디만)
+let chatMinInterval = 1800.0            // 먼저 말 거는 최소 간격(초)
+let longWorkAfter = 7200.0              // 쉬지 않고 이만큼 일하면 쉬라고 챙김
+let breakIdle = 300.0                   // 입력이 이만큼 없으면 쉰 걸로 침
+let presentIdle = 30.0                  // 마지막 입력이 이보다 최근이어야 "자리에 있음"
+let dayStartHour = 5                    // 하루의 시작 (새벽 5시 전은 전날로 침 → 밤샘 중 자정에 아침 인사 안 함)
+let openerContextTime = 600.0           // 먼저 건넨 말에 이 시간(초) 안에 대답하면 그 말을 맥락으로 붙임
+let wakeGreetDelay = 5.0                // 깨어나고 최소 이만큼(초) 뒤에 인사 (네트워크가 붙을 때까지는 더 기다림)
+let chatRetryDelay = 15.0               // 먼저 말 걸기 호출이 실패하면 이만큼 뒤에 다시 (연결 직후 불안정할 때)
+let chatMaxRetries = 2
 let defaultPersona = """
 너는 사용자의 macOS 화면 아래에 사는 작은 모몽가 펫이자 비서야.
 반말로 귀엽고 다정하게 말해.
@@ -958,6 +990,16 @@ final class Assistant: NSObject, NSTextFieldDelegate, NSWindowDelegate {
     var hideAt = Double.infinity
     var loginPATH: String?
 
+    // 먼저 말 걸기
+    var chatProcess: Process?
+    var lastChat = -Double.infinity
+    var activeSince: Double?            // 쉬지 않고 일하기 시작한 시각
+    var wokeAt: Double?                 // 잠자기에서 깨어난 시각 (아직 인사 전)
+    var opener: (text: String, at: Double)?   // 펫이 먼저 건넨 말
+    var retryChat: (situation: String, at: Double, tries: Int)?   // 실패해서 다시 해 볼 말 걸기
+    var online = false                  // 인터넷 연결됨 (잠자기에서 깨어난 직후엔 잠깐 false)
+    let netMonitor = NWPathMonitor()
+
     var sessionID: String? {
         get { UserDefaults.standard.string(forKey: "claudeSessionID") }
         set { UserDefaults.standard.set(newValue, forKey: "claudeSessionID") }
@@ -987,8 +1029,20 @@ final class Assistant: NSObject, NSTextFieldDelegate, NSWindowDelegate {
 
         // 맥이 잠자기에서 깨어나면(덮개 열기 등) 다음 말 걸기는 새 대화로
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.sessionID = nil }
+            MainActor.assumeIsolated {
+                self?.sessionID = nil
+                self?.wokeAt = ProcessInfo.processInfo.systemUptime
+                self?.activeSince = nil
+                self?.pet?.startBootNap()
+            }
         }
+
+        // 인터넷 연결 상태 (덮개를 열면 Wi-Fi가 다시 붙을 때까지 몇 초 걸림)
+        netMonitor.pathUpdateHandler = { [weak self] path in
+            let ok = path.status == .satisfied
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.online = ok } }
+        }
+        netMonitor.start(queue: DispatchQueue.global(qos: .utility))
 
         // 앱은 로그인 셸의 PATH를 모름 → claude와 그 도구들이 쓸 PATH를 미리 읽어 둠
         DispatchQueue.global(qos: .utility).async {
@@ -1077,7 +1131,12 @@ final class Assistant: NSObject, NSTextFieldDelegate, NSWindowDelegate {
                     sessionID = nil
                     UserDefaults.standard.set(persona, forKey: "claudeSessionPersona")
                 }
-                run(text, resume: sessionID)
+                var prompt = text
+                if let o = opener, ProcessInfo.processInfo.systemUptime - o.at < openerContextTime {
+                    prompt = "(방금 네가 먼저 \"\(o.text)\"라고 말을 걸었고, 아래는 거기에 대한 사용자의 대답이야)\n" + text
+                }
+                opener = nil
+                run(prompt, resume: sessionID)
             }
             return true
         }
@@ -1088,18 +1147,9 @@ final class Assistant: NSObject, NSTextFieldDelegate, NSWindowDelegate {
     func windowDidResignKey(_ n: Notification) { closeInput() }   // 다른 곳을 누르면 닫힘
 
     // MARK: 실행
-    func run(_ prompt: String, resume: String?) {
-        guard let exe = claudePath() else {
-            say("claude 명령을 못 찾았어… Claude Code가 설치돼 있는지 봐 줘!", seconds: 8)
-            return
-        }
-        var args = ["-p", prompt,
-                    "--permission-mode", claudePermissionMode,
-                    "--model", claudeModel,
-                    "--append-system-prompt", loadPersona(),
-                    "--output-format", "json"]
-        if let r = resume { args += ["--resume", r] }
-
+    /// claude를 백그라운드로 실행하고, 끝나면 메인 스레드에서 done(프로세스, stdout, stderr)
+    func launch(_ args: [String], done: @escaping (Process, Data, Data) -> Void) -> Process? {
+        guard let exe = claudePath() else { return nil }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: exe)
         p.arguments = args
@@ -1109,15 +1159,7 @@ final class Assistant: NSObject, NSTextFieldDelegate, NSWindowDelegate {
         let out = Pipe(), err = Pipe()
         p.standardOutput = out
         p.standardError = err
-        do { try p.run() } catch {
-            say("실행을 못 했어… \(error.localizedDescription)", seconds: 8)
-            return
-        }
-        process = p
-        thinkingSince = ProcessInfo.processInfo.systemUptime
-        lastDots = -1
-        hideAt = .infinity
-
+        guard (try? p.run()) != nil else { return nil }
         DispatchQueue.global(qos: .userInitiated).async {
             // stdout·stderr를 동시에 읽어야 한쪽 버퍼가 차서 멈추는 일이 없음
             let errBox = DataBox()
@@ -1128,10 +1170,28 @@ final class Assistant: NSObject, NSTextFieldDelegate, NSWindowDelegate {
             g.wait()
             p.waitUntilExit()
             let errData = errBox.data
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated { self.finished(p, out: outData, err: errData, prompt: prompt, resumed: resume != nil) }
-            }
+            DispatchQueue.main.async { MainActor.assumeIsolated { done(p, outData, errData) } }
         }
+        return p
+    }
+
+    func run(_ prompt: String, resume: String?) {
+        var args = ["-p", prompt,
+                    "--permission-mode", claudePermissionMode,
+                    "--model", claudeModel,
+                    "--append-system-prompt", loadPersona(),
+                    "--output-format", "json"]
+        if let r = resume { args += ["--resume", r] }
+        guard let p = launch(args, done: { [weak self] p, out, err in
+            self?.finished(p, out: out, err: err, prompt: prompt, resumed: resume != nil)
+        }) else {
+            say("claude를 실행하지 못했어… Claude Code가 설치돼 있는지 봐 줘!", seconds: 8)
+            return
+        }
+        process = p
+        thinkingSince = ProcessInfo.processInfo.systemUptime
+        lastDots = -1
+        hideAt = .infinity
     }
 
     func finished(_ p: Process, out: Data, err: Data, prompt: String, resumed: Bool) {
@@ -1156,6 +1216,68 @@ final class Assistant: NSObject, NSTextFieldDelegate, NSWindowDelegate {
             say(result)
         }
         pet?.react()
+    }
+
+    // MARK: 먼저 말 걸기
+    /// 1초마다: 아침 첫 만남·덮개 열고 돌아옴·오래 쉬지 않고 일함 중 하나면 한마디 건넴
+    func considerChat(now: Double, idle: Double) {
+        if idle >= breakIdle { activeSince = nil } else if activeSince == nil { activeSince = now - idle }
+        // 오프라인이면 아무 것도 소모하지 않고 연결될 때까지 기다림
+        guard online, idle < presentIdle, !busy, chatProcess == nil, !input.isVisible, !bubble.isVisible else { return }
+        // 켜지거나 깨어난 직후 자는 중이면, 일어나서 잠깐 멍하니 있은 뒤에 말 걺
+        if let p = pet, p.bootNap || now - p.lastWake < wakeIdleTime { return }
+
+        if let r = retryChat {
+            if now >= r.at { retryChat = nil; chat(r.situation, tries: r.tries) }
+            return
+        }
+
+        let day = Calendar.current.date(byAdding: .hour, value: -dayStartHour, to: Date())!
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"
+        let today = f.string(from: day)
+        var situation: String?
+        if UserDefaults.standard.string(forKey: "lastGreetDay") != today {
+            UserDefaults.standard.set(today, forKey: "lastGreetDay")
+            wokeAt = nil
+            situation = "오늘 사용자를 처음 만났어. 오늘의 첫 인사를 해"
+        } else if let w = wokeAt, now - w >= wakeGreetDelay {
+            wokeAt = nil
+            if now - lastChat >= chatMinInterval { situation = "사용자가 맥북 덮개를 열고(잠자기에서 깨어나) 돌아왔어. 반겨 줘" }
+        } else if let s = activeSince, now - s >= longWorkAfter, now - lastChat >= chatMinInterval {
+            activeSince = now                                   // 또 이만큼 지나면 다시
+            situation = "사용자가 \(Int((now - s) / 60))분 넘게 쉬지 않고 컴퓨터를 쓰고 있어. 잠깐 쉬라고 챙겨 줘"
+        }
+        if let situation { chat(situation) }
+    }
+
+    func chat(_ situation: String, tries: Int = 0) {
+        lastChat = ProcessInfo.processInfo.systemUptime
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "ko_KR")
+        f.dateFormat = "M월 d일 EEEE a h시 m분"
+        let prompt = "지금: \(f.string(from: Date())). 상황: \(situation). 사용자에게 먼저 건넬 한마디를 해."
+        let system = loadPersona() + "\n\n지금은 네가 사용자에게 먼저 말을 거는 거야. 상황에 맞는 짧은 한마디(1~2문장)만, 따옴표나 설명 없이 대사만 말해."
+        let args = ["-p", prompt, "--model", claudeModel, "--system-prompt", system,
+                    "--tools", "", "--no-session-persistence", "--strict-mcp-config", "--disable-slash-commands",
+                    "--output-format", "json"]
+        chatProcess = launch(args) { [weak self] p, out, _ in
+            guard let self, p === self.chatProcess else { return }
+            self.chatProcess = nil
+            let json = (try? JSONSerialization.jsonObject(with: out)) as? [String: Any]
+            let text = ((json?["result"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let failed = (json?["is_error"] as? Bool ?? true) || text.isEmpty
+            if failed && tries < chatMaxRetries {
+                // 연결 직후라 아직 불안정할 수 있음 → 잠시 뒤 다시
+                self.retryChat = (situation, ProcessInfo.processInfo.systemUptime + chatRetryDelay, tries + 1)
+                return
+            }
+            // 계속 실패했거나, 그사이 사용자가 말을 걸기 시작했으면 조용히 넘어감
+            guard !failed, !self.busy, !self.input.isVisible else { return }
+            self.opener = (text, ProcessInfo.processInfo.systemUptime)
+            self.say(text, seconds: 15)
+            self.bubble.view.onClick = { [weak self] in self?.ask() }   // 말풍선을 누르면 바로 대답
+            self.pet?.react()
+        }
     }
 
     func cancel() {
