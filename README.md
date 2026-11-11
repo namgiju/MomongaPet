@@ -38,7 +38,8 @@ open /Applications/MomongaPet.app
 [Claude Code](https://claude.com/claude-code) CLI가 설치돼 있고 로그인돼 있어야 해요 (구독 사용량을 씀).
 
 - 홈 폴더에서 `--permission-mode auto`로 실행돼요. 파일 읽기·수정·명령 실행을 하고, 위험해 보이는 동작은 Claude Code가 스스로 막아요
-- 대화는 이어져요. 처음부터 다시 하려면 **새 대화 시작**
+- 모델은 가벼운 Haiku를 써요 (`main.swift`의 `claudeModel`로 sonnet·opus로 바꿀 수 있음)
+- 대화는 이어져요. 처음부터 다시 하려면 **새 대화 시작**. 맥이 잠자기에서 깨어나면 자동으로 새 대화로 시작해요
 - 일하는 중엔 **하던 일 그만두기**로 취소
 - 긴 답은 잘려서 보이고, 말풍선을 누르면 전체(`~/MomongaPet/last_reply.txt`)가 열려요
 - 말투는 **말투 바꾸기…**로 `~/MomongaPet/persona.txt`를 고치면 돼요. 말투가 바뀌면 자동으로 새 대화로 시작해요 (예전 말투로 쌓인 대화에 끌려가지 않게)

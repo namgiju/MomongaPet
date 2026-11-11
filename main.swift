@@ -841,6 +841,7 @@ let petHome = (NSHomeDirectory() as NSString).appendingPathComponent("MomongaPet
 let personaPath = (petHome as NSString).appendingPathComponent("persona.txt")
 let lastReplyPath = (petHome as NSString).appendingPathComponent("last_reply.txt")
 let claudePermissionMode = "auto"       // 위험해 보이는 동작은 Claude Code가 스스로 막음
+let claudeModel = "haiku"               // 가볍게: haiku, 일을 더 잘하게: sonnet, 최고 성능: opus
 let bubbleMaxChars = 240                // 이보다 긴 답은 잘라 보여 주고, 말풍선을 누르면 전체를 엶
 let bubbleMaxWidth: CGFloat = 240
 let talkHotKey = (code: UInt32(kVK_ANSI_M), mods: UInt32(controlKey | optionKey))   // ⌃⌥M: 어디서든 말 걸기
@@ -969,6 +970,11 @@ final class Assistant: NSObject, NSTextFieldDelegate, NSWindowDelegate {
         input.contentView = box
         registerHotKey()
 
+        // 맥이 잠자기에서 깨어나면(덮개 열기 등) 다음 말 걸기는 새 대화로
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.sessionID = nil }
+        }
+
         // 앱은 로그인 셸의 PATH를 모름 → claude와 그 도구들이 쓸 PATH를 미리 읽어 둠
         DispatchQueue.global(qos: .utility).async {
             let path = Assistant.readLoginPATH()
@@ -1074,6 +1080,7 @@ final class Assistant: NSObject, NSTextFieldDelegate, NSWindowDelegate {
         }
         var args = ["-p", prompt,
                     "--permission-mode", claudePermissionMode,
+                    "--model", claudeModel,
                     "--append-system-prompt", loadPersona(),
                     "--output-format", "json"]
         if let r = resume { args += ["--resume", r] }
