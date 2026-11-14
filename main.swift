@@ -45,6 +45,14 @@ let maxJumpDX: CGFloat = 300        // 창까지 가로 거리가 이보다 멀�
 let jumpReactDelay = 0.6...1.4      // 새 창이 뜨고 이만큼(초) 뒤에 반응
 let softDropLimit: CGFloat = 30     // 발판이 이보다 조금 내려가면 상태 유지한 채 툭 떨어짐
 
+// 커서 잡기: 커서가 펫 위쪽 가까이에 잠깐 멈춰 있으면 "!" 후 한 번 폴짝 뛰어 잡으려 함 (따라다니진 않음)
+let pounceRangeX: CGFloat = 120     // 펫 중심에서 커서까지 가로 거리
+let pounceHeight: ClosedRange<CGFloat> = 30...170   // 발밑 기준 커서 높이 (이 범위일 때만)
+let pounceHover = 0.5               // 커서가 범위 안에 이만큼(초) 머물러야 반응
+let pounceCooldown = 6.0            // 한 번 뛰고 나서 이 시간 동안은 안 뜀
+let pounceChance = 0.7              // 조건이 맞았을 때 실제로 뛸 확률 (안 뛰면 쿨다운만)
+let pounceCatchDist: CGFloat = 28   // 최고점에서 머리와 커서가 이만큼 가까우면 잡은 걸로
+
 // 드래그 흔들림
 let wobbleDegrees: CGFloat = 10
 let wobbleHz = 2.0
@@ -272,6 +280,12 @@ final class Pet: NSObject {
     var approaching = false             // 점프하려고 창 쪽으로 걸어가는 중
     var lastApproachDist = CGFloat.infinity
 
+    // 커서 잡기
+    var pounceHoverStart: Double?       // 커서가 잡기 범위에 들어온 시각
+    var lastPounce = -Double.infinity
+    var pouncePending = false           // "!" 끝나면 커서로 뜀
+    var pouncing = false                // 커서 잡으러 뛰는 중 (최고점에서 잡았는지 판정)
+
     // 마우스
     var pressLocation = NSPoint.zero        // 누른 지점 (화면 좌표)
     var dragOffset = NSPoint.zero           // 창 원점 기준 잡은 위치
@@ -440,6 +454,30 @@ final class Pet: NSObject {
         return true
     }
 
+    // MARK: 커서 잡기
+    /// 펫 발밑 기준으로 커서가 잡기 범위 안에 있는지
+    func cursorInPounceRange(_ m: NSPoint, _ f: NSRect) -> Bool {
+        abs(m.x - f.midX) <= pounceRangeX && pounceHeight.contains(m.y - f.minY)
+            && !window.frame.contains(m)                              // 펫 위에 올린 커서(클릭하려는 것)는 제외
+            && NSEvent.pressedMouseButtons == 0                       // 드래그·클릭 중엔 방해 안 함
+    }
+
+    /// 머리가 커서에 닿는 높이로 한 번 뜀. 최고점이 커서 바로 아래에 오도록
+    func pounce(at m: NSPoint) {
+        let f = body
+        let g = abs(gravity)
+        let peak = max(m.y - f.minY - f.height * 0.85, 20)
+        vy = sqrt(2 * g * peak)
+        vx = (m.x - f.midX) / (vy / g)
+        platform = nil
+        dropThrough = nil
+        walkOffEdge = false; approaching = false
+        jumped = true                                                 // 스스로 뛴 거라 착지 후 헤롱거리지 않음
+        pouncing = true
+        lastPounce = ProcessInfo.processInfo.systemUptime
+        setState(.jump)
+    }
+
     func refreshWindows() {
         let list = onScreenWindows()
         if let app = NSWorkspace.shared.frontmostApplication, app.processIdentifier != getpid() {
@@ -455,6 +493,7 @@ final class Pet: NSObject {
         f.origin.y = y
         vx = 0; vy = 0
         dropThrough = nil
+        pouncing = false
         platform = w
         platformNow = w
         walkOffEdge = false
@@ -537,6 +576,7 @@ final class Pet: NSObject {
             if [.idle, .walk, .notice, .watch].contains(state) {   // 바닥에 있어도 "!"로 알아챔 (헤롱헤롱 중엔 끝난 뒤에)
                 noticeFrame = (state == .walk ? 2 : 0) + (facingLeft ? 0 : 1)
                 vx = 0; walkOffEdge = false
+                pouncePending = false                             // 창이 우선
                 setState(.notice)
                 stateTimer = pendingJumpAt - now
             }
@@ -556,7 +596,7 @@ final class Pet: NSObject {
         if listening {
             if [.idle, .walk, .notice, .watch, .dizzy, .sleep].contains(state) {
                 awaySleep = false
-                vx = 0; walkOffEdge = false; approaching = false
+                vx = 0; walkOffEdge = false; approaching = false; pouncePending = false
                 setState(.listen)
             }
         } else if state == .listen {
@@ -612,6 +652,26 @@ final class Pet: NSObject {
         if state == .notice || state == .watch { watchLeft = mouse.x < f.midX }
         if state == .watch { facingLeft = watchLeft }             // 쳐다보는 쪽 = 보고 있는 방향 (다음 "!" 방향이 어긋나지 않게)
 
+        // 커서 잡기: 커서가 머리 위 가까이에 잠깐 머물면 "!" 후 한 번 뜀 (지나가는 커서엔 반응 안 함)
+        if [.idle, .walk, .watch].contains(state) && !pendingJump && !listening && !isAway
+            && now - lastPounce >= pounceCooldown && cursorInPounceRange(mouse, f) {
+            if pounceHoverStart == nil { pounceHoverStart = now }
+            if let s = pounceHoverStart, now - s >= pounceHover {
+                pounceHoverStart = nil
+                lastPounce = now
+                if Double.random(in: 0..<1) < pounceChance {
+                    facingLeft = mouse.x < f.midX
+                    noticeFrame = (state == .walk ? 2 : 0) + (facingLeft ? 0 : 1)
+                    vx = 0; walkOffEdge = false; approaching = false
+                    pouncePending = true
+                    setState(.notice)
+                    stateTimer = noticeDuration
+                }
+            }
+        } else {
+            pounceHoverStart = nil
+        }
+
         switch state {
         case .drag:
             break
@@ -622,7 +682,16 @@ final class Pet: NSObject {
             if f.minX <= area.minX { f.origin.x = area.minX; vx = abs(vx) * 0.5 }
             if f.maxX >= area.maxX { f.origin.x = area.maxX - f.width; vx = -abs(vx) * 0.5 }
             if f.maxY >= area.maxY { f.origin.y = area.maxY - f.height; vy = min(vy, 0) }   // 천장
-            if state == .jump && vy < 0 { setState(.fall) }
+            if state == .jump && vy < 0 {
+                if pouncing {                                     // 최고점: 머리 위 커서를 잡았나
+                    pouncing = false
+                    let head = NSPoint(x: f.midX, y: f.maxY)
+                    let caught = hypot(mouse.x - head.x, mouse.y - head.y) <= pounceCatchDist
+                    assistant.blurt(caught ? ["잡았다!", "내 거야", "히힛 잡았지"].randomElement()!
+                                           : ["칫", "놓쳤어…", "거기 서!"].randomElement()!)
+                }
+                setState(.fall)
+            }
 
             if vy < 0 && f.origin.y <= screenFloor {
                 land(&f, y: screenFloor, on: nil)                 // 화면 바닥이 항상 우선
@@ -664,7 +733,11 @@ final class Pet: NSObject {
         case .notice:
             stateTimer -= dt
             if stateTimer <= 0 {
-                if pendingJump { vx = 0; setState(.idle); stateTimer = 5 }   // 창 알아챈 거면 바로 출발
+                if pouncePending {                                // 커서 알아챈 거면 아직 거기 있을 때만 뜀
+                    pouncePending = false
+                    if !pendingJump && cursorInPounceRange(mouse, f) { pounce(at: mouse) }
+                    else { decide() }
+                } else if pendingJump { vx = 0; setState(.idle); stateTimer = 5 }   // 창 알아챈 거면 바로 출발
                 else { setState(.watch) }
             }
         case .watch:
@@ -785,6 +858,7 @@ final class Pet: NSObject {
             vx = 0; vy = 0
             platform = nil
             walkOffEdge = false
+            pouncing = false; pouncePending = false
             jumped = false                      // 점프 중 잡혀서 던져지면 헤롱거림
         }
         let p = NSPoint(x: m.x - dragOffset.x, y: m.y - dragOffset.y)
@@ -1373,6 +1447,15 @@ final class Assistant: NSObject, NSTextFieldDelegate, NSWindowDelegate {
         bubble.show(t)
         if let p = pet { bubble.place(above: p.body) }
         hideAt = ProcessInfo.processInfo.systemUptime + (seconds ?? min(25, max(5, Double(t.count) * 0.12)))
+    }
+
+    /// 짧은 혼잣말: 일하는 중이거나 다른 말풍선이 떠 있으면 안 함 (last_reply.txt도 안 건드림)
+    func blurt(_ text: String) {
+        guard !busy, !bubble.isVisible, !input.isVisible, let p = pet else { return }
+        bubble.view.onClick = { [weak self] in self?.bubble.hide() }
+        bubble.show(text)
+        bubble.place(above: p.body)
+        hideAt = ProcessInfo.processInfo.systemUptime + 1.8
     }
 
     /// 매 틱: 말풍선·입력창이 펫을 따라다니고, 일하는 동안 "생각 중" 표시
